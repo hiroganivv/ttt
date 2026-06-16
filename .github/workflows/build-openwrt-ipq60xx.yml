@@ -28,23 +28,20 @@ jobs:
         toolchain: stable
         targets: aarch64-unknown-linux-musl
 
-    - name: Install cross-compilation tools
+    - name: Install aarch64-linux-musl cross-compilation toolchain
       run: |
-        sudo apt-get update
-        sudo apt-get install -y musl-tools musl-dev
-        
-        # 使用系统工具链 + cargo配置即可
-        mkdir -p ~/.cargo
-        cat >> ~/.cargo/config.toml << 'EOF'
-        [target.aarch64-unknown-linux-musl]
-        linker = "aarch64-linux-gnu-gcc"
-        
-        [env]
-        CC_aarch64_unknown_linux_musl = "aarch64-linux-gnu-gcc"
-        CXX_aarch64_unknown_linux_musl = "aarch64-linux-gnu-g++"
-        AR_aarch64_unknown_linux_musl = "aarch64-linux-gnu-ar"
-        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER = "aarch64-linux-gnu-gcc"
-        EOF
+        # 下载预编译的 musl 交叉工具链
+        curl -LO https://musl.cc/aarch64-linux-musl-cross.tgz
+        tar xzf aarch64-linux-musl-cross.tgz
+        # 将工具链放入 PATH
+        echo "$PWD/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+        # 设置 cargo 需要的环境变量
+        echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> $GITHUB_ENV
+        echo "CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++" >> $GITHUB_ENV
+        echo "AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar" >> $GITHUB_ENV
+        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc" >> $GITHUB_ENV
+        # 验证工具链
+        aarch64-linux-musl-gcc --version
 
     - name: Cache cargo registry
       uses: actions/cache@v4
@@ -70,7 +67,7 @@ jobs:
 
     - name: Strip binary
       run: |
-        aarch64-linux-gnu-strip target/aarch64-unknown-linux-musl/release/iptv-proxy
+        aarch64-linux-musl-strip target/aarch64-unknown-linux-musl/release/iptv-proxy
         ls -lh target/aarch64-unknown-linux-musl/release/iptv-proxy
 
     - name: Check binary info
@@ -83,11 +80,9 @@ jobs:
         mkdir -p openwrt-package/usr/bin
         mkdir -p openwrt-package/etc/init.d
         
-        # 复制二进制
         cp target/aarch64-unknown-linux-musl/release/iptv-proxy \
            openwrt-package/usr/bin/
         
-        # 创建init脚本
         cat > openwrt-package/etc/init.d/iptv-proxy << 'EOF'
         #!/bin/sh /etc/rc.common
         START=99
@@ -111,7 +106,6 @@ jobs:
         
         chmod +x openwrt-package/etc/init.d/iptv-proxy
         
-        # 创建安装脚本
         cat > openwrt-package/install.sh << 'EOF'
         #!/bin/sh
         echo "Installing IPTV Proxy for OpenWrt..."
@@ -126,7 +120,6 @@ jobs:
         
         chmod +x openwrt-package/install.sh
         
-        # 创建README
         cat > openwrt-package/README.md << 'EOF'
         # IPTV Proxy for OpenWrt IPQ60xx
         
@@ -152,7 +145,6 @@ jobs:
         http://192.168.1.3:8080/iptv/http://116.199.x.x/path/file.m3u8
         EOF
         
-        # 打包
         tar czf iptv-proxy-openwrt-ipq60xx.tar.gz openwrt-package/
         ls -lh iptv-proxy-openwrt-ipq60xx.tar.gz
 
@@ -190,18 +182,3 @@ jobs:
           
           # Install
           ssh root@192.168.1.3 "cd /tmp/openwrt-package && sh install.sh"
-          ```
-          
-          ### Features
-          - ✅ Two-level m3u8 support
-          - ✅ Query parameters preserved
-          - ✅ Referer injection (surrit.com/fourhoi.com)
-          - ✅ 50,000+ concurrent connections
-          - ✅ <50MB memory footprint
-          
-          ### Hardware Requirements
-          - OpenWrt on IPQ60xx (IPQ6018/6010/6000)
-          - 1GB RAM minimum
-          - 5MB storage space
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
