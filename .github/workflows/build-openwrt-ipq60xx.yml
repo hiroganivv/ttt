@@ -3,7 +3,8 @@ name: Build IPTV Proxy for OpenWrt IPQ60xx
 on:
   push:
     branches: [ main, master ]
-    tags: ['v*']
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -17,10 +18,18 @@ jobs:
     name: Build for OpenWrt IPQ60xx (aarch64_cortex-a53)
     runs-on: ubuntu-latest
     container:
-      image: messense/rust-musl-cross:aarch64-musl   # 已经包含工具链和 Rust
+      image: messense/rust-musl-cross:aarch64-musl   # 预装 aarch64-musl 工具链 + Rust
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+
+    - name: Clear stale caches and lockfile
+      run: |
+        rm -f Cargo.lock
+        rm -rf target
+        rm -rf ~/.cargo/registry/cache
+        rm -rf ~/.cargo/git/db
 
     - name: Build for aarch64-unknown-linux-musl
       run: |
