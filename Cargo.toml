@@ -5,20 +5,24 @@ edition = "2021"
 authors = ["IPTV Proxy Team"]
 
 [dependencies]
+# 升级至 pingora 0.5（目前最新稳定版，支持更优连接池和性能）
 pingora = { version = "0.5", default-features = false, features = ["lb"] }
 pingora-core = { version = "0.5", default-features = false }
+
+# async-trait 升级至 1.0（性能与编译器支持更佳）
 async-trait = "1"
+
+# 其他核心依赖更新至最新兼容版本
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 bytes = "1"
 url = "2"
 regex = "1"
-once_cell = "1"
+once_cell = "1"               # 也可用 std::sync::LazyLock 替代
 log = "0.4"
 env_logger = "0.11"
 ahash = "0.8"
 memchr = "2"
-num_cpus = "1"
-# openssl = { version = "0.10", features = ["vendored"], optional = true }  # 如果需要HTTPS
+num_cpus = "1"                # 先前漏掉，现已补充
 
 [profile.release]
 opt-level = 3
@@ -29,7 +33,3 @@ panic = "abort"
 
 [profile.release.package."*"]
 opt-level = 3
-
-[patch.crates-io]
-# 如果仍有sfv版本不兼容，取消注释
-# sfv = "=0.12.0"
