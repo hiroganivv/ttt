@@ -18,6 +18,7 @@ env_logger = "0.11"
 ahash = "0.8"
 memchr = "2"
 num_cpus = "1"
+sfv = "=0.12.0"                     # ← 关键修复
 
 [profile.release]
 opt-level = 3
