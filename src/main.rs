@@ -3,8 +3,12 @@ use bytes::Bytes;
 use log::{debug, error, info, warn};
 use memchr::memmem;
 use once_cell::sync::Lazy;
+use pingora::http::{RequestHeader, ResponseHeader};
 use pingora::prelude::*;
 use pingora::proxy::{ProxyHttp, Session};
+use pingora::services::listening::http_proxy_service;
+use pingora::server::configuration::Opt;
+use pingora::server::Server;
 use regex::Regex;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,13 +16,11 @@ use std::time::Duration;
 // ==================== 编译时常量 ====================
 
 static PROXY_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^/proxy/([^:]+):(\d+)/(.*)$").expect("Invalid proxy regex")
+    // 端口可选，若无端口默认为80
+    Regex::new(r"^/proxy/([^:]+)(?::(\d+))?/(.*)$").expect("Invalid proxy regex")
 });
 
 static M3U8_NEEDLE: &[u8] = b"http://116.199.";
-static M3U8_REPLACEMENT_PREFIX: &str = "http://";
-static M3U8_REPLACEMENT_SUFFIX: &str = ":8080/proxy/116.199.";
-
 const REFERER_VALUE: &str = "https://missav.ws/dm242/cn";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -31,10 +33,10 @@ pub struct ProxyConfig {
 }
 
 impl ProxyConfig {
-    pub fn new(local_ip: String) -> Self {
+    pub fn new(local_ip: String, bind_port: u16) -> Self {
         let replacement_pattern = format!(
-            "{}{}{}",
-            M3U8_REPLACEMENT_PREFIX, local_ip, M3U8_REPLACEMENT_SUFFIX
+            "http://{}:{}/proxy/116.199.",
+            local_ip, bind_port
         );
         Self {
             local_ip,
@@ -66,14 +68,14 @@ impl ProxyContext {
 // ==================== 核心代理逻辑 ====================
 
 pub struct IptvProxy {
-    config: Arc<ProxyConfig>,
+    config: ProxyConfig,                // 直接持有，无需 Arc（单例）
     finder: memmem::Finder<'static>,
 }
 
 impl IptvProxy {
     pub fn new(config: ProxyConfig) -> Self {
         Self {
-            config: Arc::new(config),
+            config,
             finder: memmem::Finder::new(M3U8_NEEDLE),
         }
     }
@@ -81,7 +83,7 @@ impl IptvProxy {
     #[inline]
     fn parse_iptv_url(&self, path: &str, query: &str) -> Result<url::Url> {
         let url_str = path.strip_prefix("/iptv/")
-            .ok_or_else(|| Error::new(ErrorType::HTTPStatus(400)))?;
+            .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(400), "Missing /iptv/ prefix"))?;
 
         let full_url = if query.is_empty() {
             url_str.to_string()
@@ -99,15 +101,14 @@ impl IptvProxy {
     #[inline]
     fn parse_proxy_path(&self, path: &str, query: &str) -> Result<(String, u16, String)> {
         let captures = PROXY_REGEX.captures(path)
-            .ok_or_else(|| Error::new(ErrorType::HTTPStatus(400)))?;
+            .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(400), "Invalid proxy path"))?;
 
         let host = captures.get(1).unwrap().as_str().to_string();
-        let port = captures.get(2).unwrap().as_str()
-            .parse::<u16>()
-            .map_err(|_| Error::new(ErrorType::HTTPStatus(400)))?;
+        let port = captures.get(2)
+            .map(|m| m.as_str().parse().unwrap_or(80))
+            .unwrap_or(80);                     // 端口可选，默认80
+
         let uri_path = captures.get(3).unwrap().as_str();
-        
-        // 重要：保留query参数
         let full_path = if query.is_empty() {
             format!("/{}", uri_path)
         } else {
@@ -136,6 +137,21 @@ impl ProxyHttp for IptvProxy {
         ProxyContext::new()
     }
 
+    // ---------- 健康检查及路径路由 ----------
+
+    async fn request_filter(
+        &self,
+        session: &mut Session,
+        _ctx: &mut Self::CTX,
+    ) -> Result<bool> {
+        let path = session.req_header().uri.path();
+        if path == "/health" || path == "/" {
+            session.respond(200, "OK").await?;
+            return Ok(true); // true 表示已响应，不继续后续处理
+        }
+        Ok(false)
+    }
+
     async fn upstream_peer(
         &self,
         session: &mut Session,
@@ -145,11 +161,6 @@ impl ProxyHttp for IptvProxy {
         let path = req_header.uri.path();
         let query = req_header.uri.query().unwrap_or("");
 
-        // 健康检查
-        if path == "/health" || path == "/" {
-            return Error::e_explain(ErrorType::HTTPStatus(200), "OK");
-        }
-
         // 处理 /iptv/ 路径
         if path.starts_with("/iptv/") {
             let url = self.parse_iptv_url(path, query)?;
@@ -157,17 +168,22 @@ impl ProxyHttp for IptvProxy {
             let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
             let is_https = url.scheme() == "https";
 
+            // 当前仅支持 HTTP 代理，HTTPS 暂不开放（如需 HTTPS，需引入 TLS 连接器）
+            if is_https {
+                warn!("HTTPS upstream not supported: {}", url);
+                return Error::e_explain(ErrorType::HTTPStatus(400), "HTTPS not supported");
+            }
+
             ctx.target_url = Some(url);
             ctx.is_m3u8 = path.contains(".m3u8");
             ctx.needs_referer = Self::needs_referer(&host);
             ctx.needs_rewrite = ctx.is_m3u8 && Self::needs_m3u8_rewrite(&host);
 
-            debug!("IPTV: {}:{} HTTPS:{} M3U8:{} Rewrite:{}", 
-                   host, port, is_https, ctx.is_m3u8, ctx.needs_rewrite);
+            debug!("IPTV: {}:{} M3U8:{} Rewrite:{}", host, port, ctx.is_m3u8, ctx.needs_rewrite);
 
             return Ok(Box::new(HttpPeer::new(
                 (host.clone(), port),
-                is_https,
+                false,          // 强制 false，因已拒绝 HTTPS
                 host,
             )));
         }
@@ -178,11 +194,10 @@ impl ProxyHttp for IptvProxy {
 
             ctx.target_url = Some(
                 url::Url::parse(&format!("http://{}:{}{}", host, port, full_path))
-                    .map_err(|_| Error::new(ErrorType::InternalError))?
+                    .map_err(|_| Error::explain(ErrorType::InternalError, "Failed to build proxy URL"))?
             );
 
             debug!("Proxy TS: {}:{}{}", host, port, full_path);
-
             return Ok(Box::new(HttpPeer::new(
                 (host.clone(), port),
                 false,
@@ -191,11 +206,13 @@ impl ProxyHttp for IptvProxy {
         }
 
         warn!("Invalid path: {}", path);
-        Error::e_explain(
+        Err(Error::explain(
             ErrorType::HTTPStatus(400),
-            "Use /iptv/URL or /proxy/host:port/path"
-        )
+            "Use /iptv/URL or /proxy/host:port/path",
+        ))
     }
+
+    // ---------- 请求头定制 ----------
 
     async fn upstream_request_filter(
         &self,
@@ -204,31 +221,27 @@ impl ProxyHttp for IptvProxy {
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         if let Some(url) = &ctx.target_url {
-            // 设置请求路径
             let path_and_query = if let Some(q) = url.query() {
                 format!("{}?{}", url.path(), q)
             } else {
                 url.path().to_string()
             };
-
             upstream_request.set_uri(path_and_query.as_bytes())?;
 
-            // 设置请求头
             if ctx.needs_referer {
                 upstream_request.insert_header("Referer", REFERER_VALUE)?;
             }
-
             upstream_request.insert_header("User-Agent", USER_AGENT)?;
             upstream_request.insert_header("Accept", "*/*")?;
 
-            // m3u8需要禁用压缩以便改写
             if ctx.needs_rewrite {
                 upstream_request.remove_header("Accept-Encoding");
             }
         }
-
         Ok(())
     }
+
+    // ---------- 响应头处理 ----------
 
     async fn response_filter(
         &self,
@@ -236,13 +249,13 @@ impl ProxyHttp for IptvProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // 如果需要改写body，移除Content-Length
         if ctx.needs_rewrite {
             upstream_response.remove_header("Content-Length");
         }
-
         Ok(())
     }
+
+    // ---------- 响应体改写（M3U8 IP替换） ----------
 
     fn response_body_filter(
         &self,
@@ -256,23 +269,25 @@ impl ProxyHttp for IptvProxy {
         }
 
         if let Some(bytes) = body {
-            // 使用SIMD加速的memchr查找
             if self.finder.find(bytes).is_some() {
-                // 零拷贝转换为可变字符串
                 if let Ok(content) = std::str::from_utf8(bytes) {
                     let modified = content.replace(
                         "http://116.199.",
-                        &self.config.replacement_pattern
+                        &self.config.replacement_pattern,
                     );
-
                     *body = Some(Bytes::from(modified));
-                    debug!("M3U8 rewritten, size: {} -> {}", bytes.len(), body.as_ref().unwrap().len());
+                    debug!(
+                        "M3U8 rewritten: {} -> {} bytes",
+                        content.len(),
+                        body.as_ref().unwrap().len()
+                    );
                 }
             }
         }
-
         Ok(None)
     }
+
+    // ---------- 访问日志 ----------
 
     async fn logging(
         &self,
@@ -286,16 +301,28 @@ impl ProxyHttp for IptvProxy {
             .map(|r| r.status.as_u16())
             .unwrap_or(0);
 
-        let client_addr = session.client_addr()
+        let client = session
+            .client_addr()
             .map(|a| a.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or_else(|| "unknown".into());
 
         if let Some(err) = e {
-            error!("{} {} {} - Status: {} Error: {:?}",
-                   client_addr, req.method, req.uri.path(), status, err);
+            error!(
+                "{} {} {} - Status:{} Error:{:?}",
+                client,
+                req.method,
+                req.uri.path(),
+                status,
+                err
+            );
         } else {
-            info!("{} {} {} - Status: {}",
-                 client_addr, req.method, req.uri.path(), status);
+            info!(
+                "{} {} {} - Status:{}",
+                client,
+                req.method,
+                req.uri.path(),
+                status
+            );
         }
     }
 }
@@ -303,34 +330,35 @@ impl ProxyHttp for IptvProxy {
 // ==================== 主程序 ====================
 
 fn main() {
-    // 初始化日志
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
 
     info!("========================================");
-    info!("IPTV Proxy Server v1.0.0");
+    info!("IPTV Proxy Server v1.0.0 (pingora 0.5)");
     info!("Target: IPQ60xx 1GB RAM");
-    info!("Max Concurrency: 50,000");
     info!("========================================");
 
-    // 配置
-    let local_ip = std::env::var("LOCAL_IP")
-        .unwrap_or_else(|_| "192.168.1.3".to_string());
-    let bind_addr = std::env::var("BIND_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let local_ip = std::env::var("LOCAL_IP").unwrap_or_else(|_| "192.168.1.3".to_string());
+    let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let workers = std::env::var("WORKERS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(num_cpus::get);
+        .unwrap_or_else(|| num_cpus::get());
+
+    // 从 BIND_ADDR 中提取端口（若未提供则默认 8080）
+    let bind_port: u16 = bind_addr
+        .split(':')
+        .nth(1)
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
 
     info!("Local IP: {}", local_ip);
     info!("Bind Address: {}", bind_addr);
     info!("Workers: {}", workers);
 
-    // 创建配置
-    let config = ProxyConfig::new(local_ip);
-    
+    let config = ProxyConfig::new(local_ip, bind_port);
+
     // 创建服务器
     let mut server = Server::new(Some(Opt {
         upgrade: false,
@@ -338,33 +366,21 @@ fn main() {
         nocapture: false,
         test: false,
         conf: None,
-    })).expect("Failed to create server");
-
+    }))
+    .expect("Failed to create server");
     server.bootstrap();
 
     // 配置代理服务
-    let mut proxy_service = http_proxy_service(
-        &server.configuration,
-        IptvProxy::new(config),
-    );
-
+    let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
     proxy_service.add_tcp(&bind_addr);
 
-    // 性能优化设置
-    info!("Applying performance tuning...");
-    info!("  - Worker threads: {}", workers);
-    info!("  - Max connections per worker: 65535");
-    info!("  - Total capacity: {}", workers * 65535);
-
+    info!("Performance tuning: {} workers, max 65535 conns/worker", workers);
     server.add_service(proxy_service);
 
     info!("========================================");
-    info!("Server started successfully!");
-    info!("Listening on: {}", bind_addr);
-    info!("");
+    info!("Server listening on: {}", bind_addr);
     info!("Usage:");
     info!("  M3U8: http://<ip>:8080/iptv/http://116.199.x.x/path/file.m3u8");
-    info!("  M3U8: http://<ip>:8080/iptv/https://surrit.com/path/file.m3u8");
     info!("  TS:   http://<ip>:8080/proxy/116.199.x.x:port/path/file.ts");
     info!("  Health: http://<ip>:8080/health");
     info!("========================================");
