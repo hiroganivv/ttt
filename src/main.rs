@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::Uri;
 use log::{debug, error, info, warn};
 use memchr::memmem;
 use once_cell::sync::Lazy;
@@ -10,7 +11,6 @@ use pingora::proxy::{ProxyHttp, Session};
 use pingora::server::configuration::Opt;
 use pingora::server::Server;
 use regex::Regex;
-use std::str::FromStr;
 use std::time::Duration;
 
 // ==================== 编译时常量 ====================
@@ -139,7 +139,7 @@ impl ProxyHttp for IptvProxy {
         ProxyContext::new()
     }
 
-    // ---------- 健康检查（新 API：直接发送响应） ----------
+    // ---------- 健康检查 ----------
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -147,12 +147,13 @@ impl ProxyHttp for IptvProxy {
     ) -> Result<bool> {
         let path = session.req_header().uri.path();
         if path == "/health" || path == "/" {
-            // 使用新 API 手动发送响应
+            // 构建 200 响应
             let resp = ResponseHeader::build(200, None)
                 .map_err(|e| Error::explain(ErrorType::InternalError, format!("build response: {}", e)))?;
-            session.write_response_header(Box::new(resp)).await?;
-            session.write_body(Some(Bytes::from("OK")), true).await?;
-            return Ok(true); // 已处理，不再继续
+            // write_response_header 需要第二个参数：end_of_stream = false（因为后面还要写 body）
+            session.write_response_header(Box::new(resp), false).await?;
+            session.write_response_body(Some(Bytes::from("OK")), true).await?;
+            return Ok(true); // 已处理，不再继续代理
         }
         Ok(false)
     }
@@ -235,8 +236,8 @@ impl ProxyHttp for IptvProxy {
                 url.path().to_string()
             };
 
-            // 新 API：set_uri 接受 http::Uri
-            let uri = http::Uri::from_str(&path_and_query)
+            // 转换为 http::Uri
+            let uri = Uri::try_from(path_and_query)
                 .map_err(|e| Error::explain(ErrorType::InternalError, format!("Invalid URI: {}", e)))?;
             upstream_request.set_uri(uri);
 
