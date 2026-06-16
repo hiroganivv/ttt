@@ -5,7 +5,6 @@ edition = "2021"
 authors = ["IPTV Proxy Team"]
 
 [dependencies]
-# 使用 Git 仓库的最新代码，避免 sfv 0.14 不兼容问题
 pingora = { git = "https://github.com/cloudflare/pingora", default-features = false, features = ["lb"] }
 pingora-core = { git = "https://github.com/cloudflare/pingora", default-features = false }
 async-trait = "0.1"
@@ -19,6 +18,7 @@ env_logger = "0.11"
 ahash = "0.8"
 memchr = "2"
 num_cpus = "1"
+http = "1"   # ← 新增，提供 http::Uri 类型
 
 [profile.release]
 opt-level = 3
