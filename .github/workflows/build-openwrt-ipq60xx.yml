@@ -31,16 +31,20 @@ jobs:
     - name: Install cross-compilation tools
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-          musl-tools \
-          musl-dev \
-          gcc-aarch64-linux-gnu \
-          g++-aarch64-linux-gnu
+        sudo apt-get install -y musl-tools musl-dev
         
-        # 下载 musl-cross 工具链
-        wget -q https://musl.cc/aarch64-linux-musl-cross.tgz
-        tar xzf aarch64-linux-musl-cross.tgz
-        echo "$PWD/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
+        # 使用系统工具链 + cargo配置即可
+        mkdir -p ~/.cargo
+        cat >> ~/.cargo/config.toml << 'EOF'
+        [target.aarch64-unknown-linux-musl]
+        linker = "aarch64-linux-gnu-gcc"
+        
+        [env]
+        CC_aarch64_unknown_linux_musl = "aarch64-linux-gnu-gcc"
+        CXX_aarch64_unknown_linux_musl = "aarch64-linux-gnu-g++"
+        AR_aarch64_unknown_linux_musl = "aarch64-linux-gnu-ar"
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER = "aarch64-linux-gnu-gcc"
+        EOF
 
     - name: Cache cargo registry
       uses: actions/cache@v4
@@ -61,16 +65,12 @@ jobs:
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build for aarch64-unknown-linux-musl
-      env:
-        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
-        CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
-        CXX_aarch64_unknown_linux_musl: aarch64-linux-musl-g++
       run: |
         cargo build --release --target aarch64-unknown-linux-musl -vv
 
     - name: Strip binary
       run: |
-        aarch64-linux-musl-strip target/aarch64-unknown-linux-musl/release/iptv-proxy
+        aarch64-linux-gnu-strip target/aarch64-unknown-linux-musl/release/iptv-proxy
         ls -lh target/aarch64-unknown-linux-musl/release/iptv-proxy
 
     - name: Check binary info
