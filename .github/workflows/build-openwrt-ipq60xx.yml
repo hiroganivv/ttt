@@ -61,7 +61,6 @@ jobs:
         key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build for aarch64-unknown-linux-musl
-      working-directory: pingora-iptv
       env:
         CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
         CC_aarch64_unknown_linux_musl: aarch64-linux-musl-gcc
@@ -71,13 +70,13 @@ jobs:
 
     - name: Strip binary
       run: |
-        aarch64-linux-musl-strip pingora-iptv/target/aarch64-unknown-linux-musl/release/iptv-proxy
-        ls -lh pingora-iptv/target/aarch64-unknown-linux-musl/release/iptv-proxy
+        aarch64-linux-musl-strip target/aarch64-unknown-linux-musl/release/iptv-proxy
+        ls -lh target/aarch64-unknown-linux-musl/release/iptv-proxy
 
     - name: Check binary info
       run: |
-        file pingora-iptv/target/aarch64-unknown-linux-musl/release/iptv-proxy
-        du -h pingora-iptv/target/aarch64-unknown-linux-musl/release/iptv-proxy
+        file target/aarch64-unknown-linux-musl/release/iptv-proxy
+        du -h target/aarch64-unknown-linux-musl/release/iptv-proxy
 
     - name: Create OpenWrt installation package
       run: |
@@ -85,7 +84,7 @@ jobs:
         mkdir -p openwrt-package/etc/init.d
         
         # 复制二进制
-        cp pingora-iptv/target/aarch64-unknown-linux-musl/release/iptv-proxy \
+        cp target/aarch64-unknown-linux-musl/release/iptv-proxy \
            openwrt-package/usr/bin/
         
         # 创建init脚本
@@ -162,7 +161,7 @@ jobs:
       with:
         name: iptv-proxy-openwrt-ipq60xx
         path: |
-          pingora-iptv/target/aarch64-unknown-linux-musl/release/iptv-proxy
+          target/aarch64-unknown-linux-musl/release/iptv-proxy
           iptv-proxy-openwrt-ipq60xx.tar.gz
         retention-days: 30
 
@@ -172,7 +171,7 @@ jobs:
       with:
         files: |
           iptv-proxy-openwrt-ipq60xx.tar.gz
-          pingora-iptv/target/aarch64-unknown-linux-musl/release/iptv-proxy
+          target/aarch64-unknown-linux-musl/release/iptv-proxy
         body: |
           ## IPTV Proxy for OpenWrt IPQ60xx
           
