@@ -3,8 +3,7 @@ name: Build IPTV Proxy for OpenWrt IPQ60xx
 on:
   push:
     branches: [ main, master ]
-    tags:
-      - 'v*'
+    tags: ['v*']
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -17,49 +16,11 @@ jobs:
   build:
     name: Build for OpenWrt IPQ60xx (aarch64_cortex-a53)
     runs-on: ubuntu-latest
-    
+    container:
+      image: messense/rust-musl-cross:aarch64-musl   # 已经包含工具链和 Rust
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        targets: aarch64-unknown-linux-musl
-
-    - name: Install aarch64-linux-musl cross-compilation toolchain
-      run: |
-        # 下载预编译的 musl 交叉工具链
-        curl -LO https://musl.cc/aarch64-linux-musl-cross.tgz
-        tar xzf aarch64-linux-musl-cross.tgz
-        # 将工具链放入 PATH
-        echo "$PWD/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
-        # 设置 cargo 需要的环境变量
-        echo "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc" >> $GITHUB_ENV
-        echo "CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++" >> $GITHUB_ENV
-        echo "AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar" >> $GITHUB_ENV
-        echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc" >> $GITHUB_ENV
-        # 验证工具链
-        aarch64-linux-musl-gcc --version
-
-    - name: Cache cargo registry
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache cargo index
-      uses: actions/cache@v4
-      with:
-        path: ~/.cargo/git
-        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Cache cargo build
-      uses: actions/cache@v4
-      with:
-        path: target
-        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Build for aarch64-unknown-linux-musl
       run: |
@@ -171,14 +132,8 @@ jobs:
           **Architecture**: Static-linked musl binary
           
           ### Quick Install
-          
           ```bash
-          # Download and extract
           wget https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/iptv-proxy-openwrt-ipq60xx.tar.gz
           tar xzf iptv-proxy-openwrt-ipq60xx.tar.gz
-          
-          # Upload to router
           scp -r openwrt-package root@192.168.1.3:/tmp/
-          
-          # Install
           ssh root@192.168.1.3 "cd /tmp/openwrt-package && sh install.sh"
