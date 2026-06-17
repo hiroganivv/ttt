@@ -5,8 +5,8 @@ edition = "2021"
 authors = ["IPTV Proxy Team"]
 
 [dependencies]
-pingora = { git = "https://github.com/cloudflare/pingora", default-features = false, features = ["lb", "rustls"] }
-pingora-core = { git = "https://github.com/cloudflare/pingora", default-features = false }
+pingora = { version = "0.4", default-features = false, features = ["lb", "openssl"] }
+pingora-core = { version = "0.4", default-features = false }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 bytes = "1"
@@ -19,6 +19,12 @@ ahash = "0.8"
 memchr = "2"
 num_cpus = "1"
 http = "1"
+
+# 强制锁定 sfv 版本，解决编译错误
+sfv = "=0.12.0"
+
+# vendored openssl 会自动从源码编译 OpenSSL，适合交叉编译
+openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
 opt-level = 3
