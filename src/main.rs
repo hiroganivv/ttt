@@ -236,6 +236,20 @@ impl ProxyHttp for IptvProxy {
             upstream_request.set_uri(uri);
         }
 
+        // 为 IPTV 模式设置 Host 头，防止源站因缺少 Host 而拒绝服务
+        if let ProxyMode::Iptv = ctx.mode {
+            if let Some(url) = &ctx.target_url {
+                let host = url.host_str().unwrap_or("localhost");
+                let port = url.port();
+                let host_value = if let Some(port) = port {
+                    format!("{}:{}", host, port)
+                } else {
+                    host.to_string()
+                };
+                upstream_request.insert_header("Host", &host_value)?;
+            }
+        }
+
         if let ProxyMode::AntiLeech = ctx.mode {
             if ctx.needs_referer {
                 upstream_request.insert_header("Referer", REFERER_VALUE)?;
@@ -261,6 +275,20 @@ impl ProxyHttp for IptvProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // 处理上游返回的重定向，将 Location 改写为代理路径
+        let status = upstream_response.status;
+        if status == 301 || status == 302 || status == 307 || status == 308 {
+            if let Some(loc) = upstream_response.headers.get("location") {
+                if let Ok(loc_str) = loc.to_str() {
+                    let new_loc = format!("/iptv/{}", loc_str);
+                    upstream_response.insert_header("Location", &new_loc)?;
+                    info!("Rewrite redirect location: {} -> {}", loc_str, new_loc);
+                } else {
+                    warn!("Invalid Location header encoding");
+                }
+            }
+        }
+
         if ctx.needs_rewrite_iptv || ctx.needs_rewrite_surrit {
             upstream_response.remove_header("Content-Length");
         }
