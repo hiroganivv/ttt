@@ -278,14 +278,23 @@ impl ProxyHttp for IptvProxy {
         // 处理上游返回的重定向，将 Location 改写为代理路径
         let status = upstream_response.status;
         if status == 301 || status == 302 || status == 307 || status == 308 {
-            if let Some(loc) = upstream_response.headers.get("location") {
+            // 先提取并克隆 Location 值，避免借用冲突
+            let new_loc = if let Some(loc) = upstream_response.headers.get("location") {
                 if let Ok(loc_str) = loc.to_str() {
-                    let new_loc = format!("/iptv/{}", loc_str);
-                    upstream_response.insert_header("Location", &new_loc)?;
-                    info!("Rewrite redirect location: {} -> {}", loc_str, new_loc);
+                    let loc_str_owned = loc_str.to_string();
+                    let new_loc = format!("/iptv/{}", loc_str_owned);
+                    info!("Rewrite redirect location: {} -> {}", loc_str_owned, new_loc);
+                    Some(new_loc)
                 } else {
                     warn!("Invalid Location header encoding");
+                    None
                 }
+            } else {
+                None
+            };
+            // 在释放不可变引用后再进行可变操作
+            if let Some(new_loc) = new_loc {
+                upstream_response.insert_header("Location", &new_loc)?;
             }
         }
 
