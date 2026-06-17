@@ -20,10 +20,9 @@ memchr = "2"
 num_cpus = "1"
 http = "1"
 
-# 强制锁定 sfv 版本，解决编译错误
+# 强制锁定 sfv 版本，解决 pingora-core 0.4.0 编译错误
 sfv = "=0.12.0"
-
-# vendored openssl 会自动从源码编译 OpenSSL，适合交叉编译
+# vendored OpenSSL 自动从源码编译，适合 musl 交叉编译
 openssl = { version = "0.10", features = ["vendored"] }
 
 [profile.release]
