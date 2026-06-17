@@ -24,11 +24,16 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Clean build artifacts only (keep Cargo.lock)
-      run: rm -rf target
+    - name: Setup lockfile with sfv 0.12.0
+      run: |
+        rm -rf target
+        # 生成初始 Cargo.lock
+        cargo generate-lockfile
+        # 精确降级 sfv 到 0.12.0（解决 pingora-core 不兼容问题）
+        cargo update -p sfv@0.12.0
 
-    - name: Build with locked dependencies
-      run: cargo build --release --target aarch64-unknown-linux-musl --locked -vv
+    - name: Build for aarch64-unknown-linux-musl
+      run: cargo build --release --target aarch64-unknown-linux-musl -vv
 
     # 由于 Cargo.toml 中 strip = true，二进制已被裁剪，无需额外 strip
     - name: Check binary info
