@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["IPTV Proxy Team"]
 
 [dependencies]
-pingora = { git = "https://github.com/cloudflare/pingora", default-features = false, features = ["lb"] }
+pingora = { git = "https://github.com/cloudflare/pingora", default-features = false, features = ["lb", "rustls"] }
 pingora-core = { git = "https://github.com/cloudflare/pingora", default-features = false }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
@@ -18,7 +18,7 @@ env_logger = "0.11"
 ahash = "0.8"
 memchr = "2"
 num_cpus = "1"
-http = "1"   # ← 新增，提供 http::Uri 类型
+http = "1"
 
 [profile.release]
 opt-level = 3
