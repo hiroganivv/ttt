@@ -201,7 +201,7 @@ fn main() {
         .format_timestamp_millis().init();
 
     info!("========================================");
-    info!("IPTV Proxy Server v1.0.0 (pingora 0.4)");
+    info!("IPTV Proxy Server v1.0.0 (pingora git)");
     info!("Target: IPQ60xx 1GB RAM");
     info!("========================================");
 
