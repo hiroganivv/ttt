@@ -98,11 +98,20 @@ impl ProxyHttp for IptvProxy {
         let path = req.uri.path();
         let query = req.uri.query().unwrap_or("");
 
-        if path == "/health" || path == "/" {
+        // 健康检查：仅当路径为 /health 或 / 且不含 url= 参数时
+        if path == "/health" || (path == "/" && !query.contains("url=")) {
             let resp = ResponseHeader::build(200, None)
                 .map_err(|e| Error::explain(ErrorType::InternalError, format!("build response: {}", e)))?;
             session.write_response_header(Box::new(resp), false).await?;
             session.write_response_body(Some(Bytes::from("OK")), true).await?;
+            return Ok(true);
+        }
+
+        // favicon.ico 返回 404，避免日志污染
+        if path == "/favicon.ico" {
+            let resp = ResponseHeader::build(404, None)
+                .map_err(|e| Error::explain(ErrorType::InternalError, format!("build response: {}", e)))?;
+            session.write_response_header(Box::new(resp), true).await?;
             return Ok(true);
         }
 
