@@ -115,10 +115,11 @@ impl ProxyHttp for IptvProxy {
             let encoded = &url_param[4..];
             if let Ok(decoded) = urlencoding::decode(encoded) {
                 info!("Decoded anti-leech URL: {}", decoded);
-                let decoded_str = decoded.to_string(); // 转换为 String
+                let decoded_str = decoded.to_string();
 
                 if let Ok(url) = url::Url::parse(&decoded_str) {
                     let host = url.host_str().unwrap_or("surrit.com").to_string();
+                    let new_path = url.path().to_string();
                     let is_m3u8 = decoded_str.ends_with(".m3u8");
 
                     ctx.mode = ProxyMode::AntiLeech;
@@ -133,7 +134,6 @@ impl ProxyHttp for IptvProxy {
                         ctx.base_url = Some(decoded_str);
                     }
 
-                    let new_path = url.path().to_string();
                     session.req_header_mut().set_raw_path(new_path.as_bytes())?;
                     session.req_header_mut().insert_header("Host", &host)?;
 
