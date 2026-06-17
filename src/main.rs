@@ -10,6 +10,7 @@ use pingora::proxy::http_proxy_service;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::server::configuration::Opt;
 use pingora::server::Server;
+use pingora::tls::rustls::TlsConnector;
 use regex::Regex;
 use std::time::Duration;
 
@@ -147,13 +148,11 @@ impl ProxyHttp for IptvProxy {
     ) -> Result<bool> {
         let path = session.req_header().uri.path();
         if path == "/health" || path == "/" {
-            // 构建 200 响应
             let resp = ResponseHeader::build(200, None)
                 .map_err(|e| Error::explain(ErrorType::InternalError, format!("build response: {}", e)))?;
-            // write_response_header 需要第二个参数：end_of_stream = false（因为后面还要写 body）
             session.write_response_header(Box::new(resp), false).await?;
             session.write_response_body(Some(Bytes::from("OK")), true).await?;
-            return Ok(true); // 已处理，不再继续代理
+            return Ok(true);
         }
         Ok(false)
     }
@@ -176,26 +175,27 @@ impl ProxyHttp for IptvProxy {
                 .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
             let is_https = url.scheme() == "https";
 
-            if is_https {
-                warn!("HTTPS upstream not supported: {}", url);
-                return Err(Error::explain(ErrorType::HTTPStatus(400), "HTTPS not supported"));
-            }
-
             ctx.target_url = Some(url);
             ctx.is_m3u8 = path.contains(".m3u8");
             ctx.needs_referer = Self::needs_referer(&host);
             ctx.needs_rewrite = ctx.is_m3u8 && Self::needs_m3u8_rewrite(&host);
 
-            debug!(
-                "IPTV: {}:{} M3U8:{} Rewrite:{}",
-                host, port, ctx.is_m3u8, ctx.needs_rewrite
+            let mut peer = HttpPeer::new(
+                (host.clone(), port),
+                is_https,
+                host.clone(),
             );
 
-            return Ok(Box::new(HttpPeer::new(
-                (host.clone(), port),
-                false,
-                host,
-            )));
+            if is_https {
+                peer.options.set_tls(Some(Box::new(TlsConnector::new())));
+            }
+
+            debug!(
+                "IPTV: {}:{} HTTPS:{} M3U8:{} Rewrite:{}",
+                host, port, is_https, ctx.is_m3u8, ctx.needs_rewrite
+            );
+
+            return Ok(Box::new(peer));
         }
 
         // 处理 /proxy/ 路径
@@ -222,7 +222,6 @@ impl ProxyHttp for IptvProxy {
         ))
     }
 
-    // ---------- 请求头定制 ----------
     async fn upstream_request_filter(
         &self,
         _session: &mut Session,
@@ -236,7 +235,6 @@ impl ProxyHttp for IptvProxy {
                 url.path().to_string()
             };
 
-            // 转换为 http::Uri
             let uri = Uri::try_from(path_and_query)
                 .map_err(|e| Error::explain(ErrorType::InternalError, format!("Invalid URI: {}", e)))?;
             upstream_request.set_uri(uri);
@@ -254,7 +252,6 @@ impl ProxyHttp for IptvProxy {
         Ok(())
     }
 
-    // ---------- 响应头处理 ----------
     async fn response_filter(
         &self,
         _session: &mut Session,
@@ -267,7 +264,6 @@ impl ProxyHttp for IptvProxy {
         Ok(())
     }
 
-    // ---------- 响应体改写（M3U8 IP替换） ----------
     fn response_body_filter(
         &self,
         _session: &mut Session,
@@ -296,7 +292,6 @@ impl ProxyHttp for IptvProxy {
         Ok(None)
     }
 
-    // ---------- 访问日志 ----------
     async fn logging(
         &self,
         session: &mut Session,
@@ -334,8 +329,6 @@ impl ProxyHttp for IptvProxy {
         }
     }
 }
-
-// ==================== 主程序 ====================
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -379,18 +372,16 @@ fn main() {
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
     proxy_service.add_tcp(&bind_addr);
 
-    info!(
-        "Performance tuning: {} workers, max 65535 conns/worker",
-        workers
-    );
+    info!("Performance tuning: {} workers, max 65535 conns/worker", workers);
     server.add_service(proxy_service);
 
     info!("========================================");
     info!("Server listening on: {}", bind_addr);
     info!("Usage:");
-    info!("  M3U8: http://<ip>:8080/iptv/http://116.199.x.x/path/file.m3u8");
-    info!("  TS:   http://<ip>:8080/proxy/116.199.x.x:port/path/file.ts");
-    info!("  Health: http://<ip>:8080/health");
+    info!("  IPTV M3U8:  http://<ip>:8080/iptv/http://116.199.x.x/path/file.m3u8");
+    info!("  Surrit M3U8: http://<ip>:8080/iptv/https://surrit.com/.../playlist.m3u8");
+    info!("  TS (HTTP):  http://<ip>:8080/proxy/116.199.x.x:port/path/file.ts");
+    info!("  Health:     http://<ip>:8080/health");
     info!("========================================");
 
     server.run_forever();
