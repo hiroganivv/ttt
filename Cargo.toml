@@ -5,8 +5,8 @@ edition = "2021"
 authors = ["IPTV Proxy Team"]
 
 [dependencies]
-pingora = { git = "https://github.com/cloudflare/pingora", default-features = false, features = ["lb", "rustls"] }
-pingora-core = { git = "https://github.com/cloudflare/pingora", default-features = false }
+pingora = { git = "https://github.com/cloudflare/pingora", tag = "v0.8.0", default-features = false, features = ["lb", "rustls"] }
+pingora-core = { git = "https://github.com/cloudflare/pingora", tag = "v0.8.0", default-features = false }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 bytes = "1"
