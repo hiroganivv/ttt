@@ -10,14 +10,13 @@ use pingora::proxy::http_proxy_service;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::server::configuration::Opt;
 use pingora::server::Server;
-use pingora::tls::rustls::TlsConnector;
+use pingora::tls::TlsConnector;   // 已修正
 use regex::Regex;
 use std::time::Duration;
 
 // ==================== 编译时常量 ====================
 
 static PROXY_REGEX: Lazy<Regex> = Lazy::new(|| {
-    // 端口可选，若无端口默认为80
     Regex::new(r"^/proxy/([^:]+)(?::(\d+))?/(.*)$").expect("Invalid proxy regex")
 });
 
@@ -140,7 +139,6 @@ impl ProxyHttp for IptvProxy {
         ProxyContext::new()
     }
 
-    // ---------- 健康检查 ----------
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -187,7 +185,7 @@ impl ProxyHttp for IptvProxy {
             );
 
             if is_https {
-                peer.options.set_tls(Some(Box::new(TlsConnector::new())));
+                peer.set_tls(Some(Box::new(TlsConnector::new())));
             }
 
             debug!(
@@ -336,7 +334,7 @@ fn main() {
         .init();
 
     info!("========================================");
-    info!("IPTV Proxy Server v1.0.0 (pingora git)");
+    info!("IPTV Proxy Server v1.0.0 (pingora 0.8)");
     info!("Target: IPQ60xx 1GB RAM");
     info!("========================================");
 
