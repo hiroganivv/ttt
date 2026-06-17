@@ -24,19 +24,13 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Clear caches and force sfv to 0.12.0
-      run: |
-        rm -f Cargo.lock
-        rm -rf target
-        rm -rf ~/.cargo/registry/cache
-        rm -rf ~/.cargo/git/db
-        cargo update -p sfv --precise 0.12.0
+    - name: Clean build artifacts only (keep Cargo.lock)
+      run: rm -rf target
 
-    - name: Build for aarch64-unknown-linux-musl
-      run: cargo build --release --target aarch64-unknown-linux-musl -vv
+    - name: Build with locked dependencies
+      run: cargo build --release --target aarch64-unknown-linux-musl --locked -vv
 
     # 由于 Cargo.toml 中 strip = true，二进制已被裁剪，无需额外 strip
-    # 仅检查二进制信息
     - name: Check binary info
       run: |
         file target/aarch64-unknown-linux-musl/release/iptv-proxy
