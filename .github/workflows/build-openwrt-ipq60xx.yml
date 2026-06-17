@@ -24,18 +24,15 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Generate lockfile and verify sfv version
+    - name: Force sfv to 0.12.0 and generate lockfile
       run: |
         rm -rf target
-        cargo generate-lockfile
-        echo "Verifying sfv version in Cargo.lock:"
-        grep -A 2 'name = "sfv"' Cargo.lock
-        # 必须是 0.12.0，否则退出
-        grep -q 'version = "0.12.0"' Cargo.lock || (echo "ERROR: sfv version is not 0.12.0" && exit 1)
+        cargo update -p sfv@0.12.0 --precise 0.12.0
 
-    - name: Build with locked dependencies
-      run: cargo build --release --target aarch64-unknown-linux-musl --locked -vv
+    - name: Build for aarch64-unknown-linux-musl
+      run: cargo build --release --target aarch64-unknown-linux-musl -vv
 
+    # 由于 Cargo.toml 中 strip = true，二进制已被裁剪，无需额外 strip
     - name: Check binary info
       run: |
         file target/aarch64-unknown-linux-musl/release/iptv-proxy
@@ -43,8 +40,10 @@ jobs:
 
     - name: Create OpenWrt installation package
       run: |
-        mkdir -p openwrt-package/usr/bin openwrt-package/etc/init.d
-        cp target/aarch64-unknown-linux-musl/release/iptv-proxy openwrt-package/usr/bin/
+        mkdir -p openwrt-package/usr/bin
+        mkdir -p openwrt-package/etc/init.d
+        cp target/aarch64-unknown-linux-musl/release/iptv-proxy \
+           openwrt-package/usr/bin/
         cat > openwrt-package/etc/init.d/iptv-proxy << 'EOF'
         #!/bin/sh /etc/rc.common
         START=99
