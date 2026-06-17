@@ -10,7 +10,7 @@ use pingora::proxy::http_proxy_service;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::server::configuration::Opt;
 use pingora::server::Server;
-use pingora::tls::TlsConnector;   // 已修正
+use pingora::tls::TlsConnector;
 use regex::Regex;
 use std::time::Duration;
 
@@ -139,6 +139,7 @@ impl ProxyHttp for IptvProxy {
         ProxyContext::new()
     }
 
+    // ---------- 健康检查 ----------
     async fn request_filter(
         &self,
         session: &mut Session,
@@ -334,7 +335,7 @@ fn main() {
         .init();
 
     info!("========================================");
-    info!("IPTV Proxy Server v1.0.0 (pingora 0.8)");
+    info!("IPTV Proxy Server v1.0.0 (pingora 0.4)");
     info!("Target: IPQ60xx 1GB RAM");
     info!("========================================");
 
