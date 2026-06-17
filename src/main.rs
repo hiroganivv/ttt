@@ -13,13 +13,18 @@ use pingora::server::Server;
 use regex::Regex;
 use std::time::Duration;
 
+// ==================== 正则与常量 ====================
+
 static PROXY_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^/proxy/([^:]+)(?::(\d+))?/(.*)$").expect("Invalid proxy regex")
 });
 
 static M3U8_NEEDLE: &[u8] = b"http://116.199.";
-const REFERER_VALUE: &str = "https://missav.ws/dm242/cn";
+
+const REFERER_VALUE: &str = "https://missav.ws/dm242/cn";   // surrit.com 要求
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// ==================== 配置 ====================
 
 #[derive(Clone)]
 pub struct ProxyConfig {
@@ -34,18 +39,38 @@ impl ProxyConfig {
     }
 }
 
+// ==================== 请求上下文 ====================
+
+enum ProxyMode {
+    Iptv,                   // 原有 IPTV 代理：/iptv/ 或 /proxy/
+    AntiLeech,              // 防盗链代理：?url= 参数
+}
+
 pub struct ProxyContext {
+    mode: ProxyMode,
     target_url: Option<url::Url>,
     is_m3u8: bool,
     needs_referer: bool,
-    needs_rewrite: bool,
+    needs_rewrite_iptv: bool,  // 是否替换 IP（IPTV 模式）
+    needs_rewrite_surrit: bool,// 是否用代理包 m3u8（防盗链模式）
+    base_url: Option<String>,  // 防盗链模式下，用于拼接相对路径
 }
 
 impl ProxyContext {
     fn new() -> Self {
-        Self { target_url: None, is_m3u8: false, needs_referer: false, needs_rewrite: false }
+        Self {
+            mode: ProxyMode::Iptv,
+            target_url: None,
+            is_m3u8: false,
+            needs_referer: false,
+            needs_rewrite_iptv: false,
+            needs_rewrite_surrit: false,
+            base_url: None,
+        }
     }
 }
+
+// ==================== 代理主体 ====================
 
 pub struct IptvProxy {
     config: ProxyConfig,
@@ -56,34 +81,6 @@ impl IptvProxy {
     pub fn new(config: ProxyConfig) -> Self {
         Self { config, finder: memmem::Finder::new(M3U8_NEEDLE) }
     }
-
-    fn parse_iptv_url(&self, path: &str, query: &str) -> Result<url::Url> {
-        let url_str = path.strip_prefix("/iptv/")
-            .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(400), "Missing /iptv/ prefix"))?;
-        let full_url = if query.is_empty() { url_str.to_string() } else { format!("{}?{}", url_str, query) };
-        url::Url::parse(&full_url).map_err(|e| {
-            error!("URL parse error: {} - {}", full_url, e);
-            Error::explain(ErrorType::HTTPStatus(400), format!("Invalid URL: {}", e))
-        })
-    }
-
-    fn parse_proxy_path(&self, path: &str, query: &str) -> Result<(String, u16, String)> {
-        let captures = PROXY_REGEX.captures(path)
-            .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(400), "Invalid proxy path"))?;
-        let host = captures.get(1).unwrap().as_str().to_string();
-        let port = captures.get(2).map(|m| m.as_str().parse().unwrap_or(80)).unwrap_or(80);
-        let uri_path = captures.get(3).unwrap().as_str();
-        let full_path = if query.is_empty() { format!("/{}", uri_path) } else { format!("/{}?{}", uri_path, query) };
-        Ok((host, port, full_path))
-    }
-
-    fn needs_referer(host: &str) -> bool {
-        host.contains("surrit.com") || host.contains("fourhoi.com")
-    }
-
-    fn needs_m3u8_rewrite(host: &str) -> bool {
-        host.contains("116.199")
-    }
 }
 
 #[async_trait]
@@ -92,8 +89,17 @@ impl ProxyHttp for IptvProxy {
 
     fn new_ctx(&self) -> Self::CTX { ProxyContext::new() }
 
-    async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
-        let path = session.req_header().uri.path();
+    // ==================== 请求过滤：解析路径并分类 ====================
+    async fn request_filter(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<bool> {
+        let req = session.req_header();
+        let path = req.uri.path();
+        let query = req.uri.query().unwrap_or("");
+
+        // 健康检查
         if path == "/health" || path == "/" {
             let resp = ResponseHeader::build(200, None)
                 .map_err(|e| Error::explain(ErrorType::InternalError, format!("build response: {}", e)))?;
@@ -101,88 +107,237 @@ impl ProxyHttp for IptvProxy {
             session.write_response_body(Some(Bytes::from("OK")), true).await?;
             return Ok(true);
         }
-        Ok(false)
-    }
 
-    async fn upstream_peer(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
-        let req_header = session.req_header();
-        let path = req_header.uri.path();
-        let query = req_header.uri.query().unwrap_or("");
-
-        if path.starts_with("/iptv/") {
-            let url = self.parse_iptv_url(path, query)?;
-            let host = url.host_str().unwrap_or("localhost").to_string();
-            let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
-            let is_https = url.scheme() == "https";
-
-            ctx.target_url = Some(url);
-            ctx.is_m3u8 = path.contains(".m3u8");
-            ctx.needs_referer = Self::needs_referer(&host);
-            ctx.needs_rewrite = ctx.is_m3u8 && Self::needs_m3u8_rewrite(&host);
-
-            // pingora 会根据 is_https 自动启用 TLS（rustls），无需手动 set_tls
-            let peer = HttpPeer::new((host.clone(), port), is_https, host.clone());
-
-            debug!("IPTV: {}:{} HTTPS:{} M3U8:{} Rewrite:{}", host, port, is_https, ctx.is_m3u8, ctx.needs_rewrite);
-            return Ok(Box::new(peer));
+        // 模式1：原有 IPTV 代理（/iptv/ 或 /proxy/）
+        if path.starts_with("/iptv/") || path.starts_with("/proxy/") {
+            ctx.mode = ProxyMode::Iptv;
+            return Ok(false);  // 交给 upstream_peer 处理
         }
 
-        if path.starts_with("/proxy/") {
-            let (host, port, full_path) = self.parse_proxy_path(path, query)?;
-            ctx.target_url = Some(
-                url::Url::parse(&format!("http://{}:{}{}", host, port, full_path))
-                    .map_err(|_| Error::explain(ErrorType::InternalError, "Failed to build proxy URL"))?
-            );
-            debug!("Proxy TS: {}:{}{}", host, port, full_path);
-            return Ok(Box::new(HttpPeer::new((host.clone(), port), false, host)));
-        }
+        // 模式2：防盗链代理（?url=）
+        if let Some(url_param) = query.split('&').find(|p| p.starts_with("url=")) {
+            let encoded = &url_param[4..];
+            if let Ok(decoded) = urlencoding::decode(encoded) {
+                info!("Decoded anti-leech URL: {}", decoded);
 
-        warn!("Invalid path: {}", path);
-        Err(Error::explain(ErrorType::HTTPStatus(400), "Use /iptv/URL or /proxy/host:port/path"))
-    }
+                if let Ok(url) = url::Url::parse(&decoded) {
+                    let host = url.host_str().unwrap_or("surrit.com").to_string();
+                    let is_m3u8 = decoded.ends_with(".m3u8");
 
-    async fn upstream_request_filter(&self, _session: &mut Session, upstream_request: &mut RequestHeader, ctx: &mut Self::CTX) -> Result<()> {
-        if let Some(url) = &ctx.target_url {
-            let path_and_query = if let Some(q) = url.query() { format!("{}?{}", url.path(), q) } else { url.path().to_string() };
-            let uri = Uri::try_from(path_and_query)
-                .map_err(|e| Error::explain(ErrorType::InternalError, format!("Invalid URI: {}", e)))?;
-            upstream_request.set_uri(uri);
+                    ctx.mode = ProxyMode::AntiLeech;
+                    ctx.target_url = Some(url);
+                    ctx.is_m3u8 = is_m3u8;
+                    ctx.needs_referer = host.contains("surrit.com") || host.contains("fourhoi.com");
+                    ctx.needs_rewrite_surrit = is_m3u8;  // 对所有 m3u8 均启用代理重写
 
-            if ctx.needs_referer {
-                upstream_request.insert_header("Referer", REFERER_VALUE)?;
-            }
-            upstream_request.insert_header("User-Agent", USER_AGENT)?;
-            upstream_request.insert_header("Accept", "*/*")?;
+                    // 计算 base_url（用于相对路径）
+                    if let Some(last_slash) = decoded.rfind('/') {
+                        ctx.base_url = Some(decoded[..last_slash + 1].to_string());
+                    } else {
+                        ctx.base_url = Some(decoded.clone());
+                    }
 
-            if ctx.needs_rewrite {
-                upstream_request.remove_header("Accept-Encoding");
-            }
-        }
-        Ok(())
-    }
+                    // 修改请求行路径为目标路径
+                    let new_path = url.path().to_string();
+                    session.req_header_mut().set_raw_path(new_path.as_bytes())?;
 
-    async fn response_filter(&self, _session: &mut Session, upstream_response: &mut ResponseHeader, ctx: &mut Self::CTX) -> Result<()> {
-        if ctx.needs_rewrite { upstream_response.remove_header("Content-Length"); }
-        Ok(())
-    }
+                    // 设置 Host 头
+                    session.req_header_mut().insert_header("Host", &host)?;
 
-    fn response_body_filter(&self, _session: &mut Session, body: &mut Option<Bytes>, _end_of_stream: bool, ctx: &mut Self::CTX) -> Result<Option<Duration>> {
-        if !ctx.needs_rewrite { return Ok(None); }
-        if let Some(bytes) = body.as_ref() {
-            if self.finder.find(bytes).is_some() {
-                if let Ok(content) = std::str::from_utf8(bytes) {
-                    let old_len = content.len();
-                    let modified = content.replace("http://116.199.", &self.config.replacement_pattern);
-                    let new_len = modified.len();
-                    *body = Some(Bytes::from(modified));
-                    debug!("M3U8 rewritten: {} -> {} bytes", old_len, new_len);
+                    return Ok(false);
                 }
             }
         }
+
+        warn!("Invalid path: {}", path);
+        Err(Error::explain(ErrorType::HTTPStatus(400), "Use /iptv/URL, /proxy/host:port/path, or ?url=encoded_target"))
+    }
+
+    // ==================== 选择上游 ====================
+    async fn upstream_peer(
+        &self,
+        session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<Box<HttpPeer>> {
+        match ctx.mode {
+            ProxyMode::Iptv => {
+                let req = session.req_header();
+                let path = req.uri.path();
+                let query = req.uri.query().unwrap_or("");
+
+                // /iptv/ 解析
+                if path.starts_with("/iptv/") {
+                    let url_str = path.strip_prefix("/iptv/")
+                        .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(400), "Bad /iptv/ URL"))?;
+                    let full = if query.is_empty() { url_str.to_string() } else { format!("{}?{}", url_str, query) };
+                    let url = url::Url::parse(&full)
+                        .map_err(|e| Error::explain(ErrorType::HTTPStatus(400), format!("Invalid URL: {}", e)))?;
+
+                    let host = url.host_str().unwrap_or("localhost").to_string();
+                    let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+                    let is_https = url.scheme() == "https";
+
+                    ctx.target_url = Some(url);
+                    ctx.is_m3u8 = path.contains(".m3u8");
+                    ctx.needs_referer = false;  // IPTV 不需要 Referer
+                    ctx.needs_rewrite_iptv = ctx.is_m3u8 && host.contains("116.199");
+
+                    let peer = HttpPeer::new((host.clone(), port), is_https, host.clone());
+                    return Ok(Box::new(peer));
+                }
+
+                // /proxy/ 解析
+                if path.starts_with("/proxy/") {
+                    let captures = PROXY_REGEX.captures(path)
+                        .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(400), "Invalid proxy path"))?;
+                    let host = captures.get(1).unwrap().as_str().to_string();
+                    let port = captures.get(2).map(|m| m.as_str().parse().unwrap_or(80)).unwrap_or(80);
+                    let uri_path = captures.get(3).unwrap().as_str();
+                    let full_path = if query.is_empty() { format!("/{}", uri_path) } else { format!("/{}?{}", uri_path, query) };
+                    let url = url::Url::parse(&format!("http://{}:{}{}", host, port, full_path))
+                        .map_err(|_| Error::explain(ErrorType::InternalError, "Bad proxy URL"))?;
+
+                    ctx.target_url = Some(url);
+                    ctx.is_m3u8 = false;
+                    ctx.needs_referer = false;
+                    ctx.needs_rewrite_iptv = false;
+
+                    return Ok(Box::new(HttpPeer::new((host.clone(), port), false, host)));
+                }
+
+                unreachable!()
+            }
+
+            ProxyMode::AntiLeech => {
+                let target = ctx.target_url.as_ref().unwrap();
+                let host = target.host_str().unwrap_or("surrit.com").to_string();
+                let port = target.port().unwrap_or(if target.scheme() == "https" { 443 } else { 80 });
+                let is_https = target.scheme() == "https";
+
+                info!("AntiLeech upstream: {}:{} (TLS: {})", host, port, is_https);
+                Ok(Box::new(HttpPeer::new((host.clone(), port), is_https, host)))
+            }
+        }
+    }
+
+    // ==================== 向上游请求添加头 ====================
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        // 设置 URI（两种模式都需要）
+        if let Some(url) = &ctx.target_url {
+            let path_and_query = if let Some(q) = url.query() {
+                format!("{}?{}", url.path(), q)
+            } else {
+                url.path().to_string()
+            };
+            let uri = Uri::try_from(path_and_query)
+                .map_err(|e| Error::explain(ErrorType::InternalError, format!("Invalid URI: {}", e)))?;
+            upstream_request.set_uri(uri);
+        }
+
+        // 防盗链模式添加请求头
+        if let ProxyMode::AntiLeech = ctx.mode {
+            if ctx.needs_referer {
+                upstream_request.insert_header("Referer", REFERER_VALUE)?;
+                info!("Added Referer header for anti-leech");
+            }
+            upstream_request.insert_header("User-Agent", USER_AGENT)?;
+            upstream_request.insert_header("Accept", "*/*")?;
+            if ctx.needs_rewrite_surrit {
+                upstream_request.remove_header("Accept-Encoding");
+            }
+        }
+
+        // IPTV 模式如需改写 m3u8，也禁用压缩
+        if ctx.needs_rewrite_iptv {
+            upstream_request.remove_header("Accept-Encoding");
+        }
+
+        Ok(())
+    }
+
+    // ==================== 响应头处理 ====================
+    async fn response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if ctx.needs_rewrite_iptv || ctx.needs_rewrite_surrit {
+            upstream_response.remove_header("Content-Length");
+        }
+        Ok(())
+    }
+
+    // ==================== 响应体处理 ====================
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        // IPTV 模式：替换 116.199.x.x 为代理地址
+        if ctx.needs_rewrite_iptv {
+            if let Some(bytes) = body.as_ref() {
+                if self.finder.find(bytes).is_some() {
+                    if let Ok(content) = std::str::from_utf8(bytes) {
+                        let modified = content.replace(
+                            "http://116.199.",
+                            &self.config.replacement_pattern,
+                        );
+                        *body = Some(Bytes::from(modified));
+                        debug!("IPTV m3u8 rewritten");
+                    }
+                }
+            }
+        }
+
+        // 防盗链模式：将 m3u8 中的所有 URL 包成 ?url= 代理
+        if ctx.needs_rewrite_surrit {
+            if let Some(bytes) = body.as_ref() {
+                if let Ok(content) = std::str::from_utf8(bytes) {
+                    let mut new_content = String::new();
+                    for line in content.lines() {
+                        if line.starts_with('#') || line.trim().is_empty() {
+                            new_content.push_str(line);
+                        } else {
+                            // 拼接绝对 URL
+                            let full_url = if line.starts_with("http://") || line.starts_with("https://") {
+                                line.to_string()
+                            } else {
+                                format!("{}{}", ctx.base_url.as_ref().unwrap(), line)
+                            };
+                            let encoded = urlencoding::encode(&full_url);
+                            new_content.push_str(&format!("http://{}:{}/?url={}",
+                                self.config.local_ip,
+                                std::env::var("BIND_ADDR")
+                                    .unwrap_or_else(|_| "0.0.0.0:8080".to_string())
+                                    .split(':').nth(1).unwrap_or("8080"),
+                                encoded));
+                        }
+                        new_content.push('\n');
+                    }
+                    *body = Some(Bytes::from(new_content));
+                    debug!("Anti-leech m3u8 rewritten");
+                }
+            }
+        }
+
         Ok(None)
     }
 
-    async fn logging(&self, session: &mut Session, e: Option<&Error>, _ctx: &mut Self::CTX) {
+    // ==================== 日志 ====================
+    async fn logging(
+        &self,
+        session: &mut Session,
+        e: Option<&Error>,
+        ctx: &mut Self::CTX,
+    ) {
         let req = session.req_header();
         let status = session.response_written().map(|r| r.status.as_u16()).unwrap_or(0);
         let client = session.client_addr().map(|a| a.to_string()).unwrap_or_else(|| "unknown".into());
@@ -194,6 +349,7 @@ impl ProxyHttp for IptvProxy {
     }
 }
 
+// ==================== 主函数 ====================
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis().init();
@@ -227,8 +383,8 @@ fn main() {
     info!("Server listening on: {}", bind_addr);
     info!("Usage:");
     info!("  IPTV M3U8:  http://<ip>:8080/iptv/http://116.199.x.x/path/file.m3u8");
-    info!("  Surrit M3U8: http://<ip>:8080/iptv/https://surrit.com/.../playlist.m3u8");
     info!("  TS (HTTP):  http://<ip>:8080/proxy/116.199.x.x:port/path/file.ts");
+    info!("  Surrit/Fourhoi: http://<ip>:8080/?url=https%3A%2F%2Fsurrit.com%2F...%2Fplaylist.m3u8");
     info!("  Health:     http://<ip>:8080/health");
     info!("========================================");
 
