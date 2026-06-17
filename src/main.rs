@@ -10,7 +10,6 @@ use pingora::proxy::http_proxy_service;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::server::configuration::Opt;
 use pingora::server::Server;
-use pingora::tls::TlsConnector;
 use regex::Regex;
 use std::time::Duration;
 
@@ -121,10 +120,9 @@ impl ProxyHttp for IptvProxy {
             ctx.needs_referer = Self::needs_referer(&host);
             ctx.needs_rewrite = ctx.is_m3u8 && Self::needs_m3u8_rewrite(&host);
 
-            let mut peer = HttpPeer::new((host.clone(), port), is_https, host.clone());
-            if is_https {
-                peer.set_tls(Some(Box::new(TlsConnector::new())));
-            }
+            // pingora 会根据 is_https 自动启用 TLS（rustls），无需手动 set_tls
+            let peer = HttpPeer::new((host.clone(), port), is_https, host.clone());
+
             debug!("IPTV: {}:{} HTTPS:{} M3U8:{} Rewrite:{}", host, port, is_https, ctx.is_m3u8, ctx.needs_rewrite);
             return Ok(Box::new(peer));
         }
