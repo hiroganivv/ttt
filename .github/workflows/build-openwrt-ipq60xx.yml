@@ -24,14 +24,15 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Generate lockfile and force sfv 0.12.0
+    - name: Generate lockfile with sfv 0.12.0
       run: |
         rm -rf target
         cargo generate-lockfile
-        cargo update -p sfv --precise 0.12.0
+        # 确认 sfv 版本已锁定为 0.12.0
+        grep -A 2 'name = "sfv"' Cargo.lock
 
-    - name: Build for aarch64-unknown-linux-musl
-      run: cargo build --release --target aarch64-unknown-linux-musl -vv
+    - name: Build with locked dependencies
+      run: cargo build --release --target aarch64-unknown-linux-musl --locked -vv
 
     # 由于 Cargo.toml 中 strip = true，二进制已被裁剪，无需额外 strip
     - name: Check binary info
