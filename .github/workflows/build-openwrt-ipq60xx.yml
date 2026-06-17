@@ -24,15 +24,9 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Force sfv to 0.12.0 and generate lockfile
-      run: |
-        rm -rf target
-        cargo update -p sfv@0.12.0 --precise 0.12.0
-
     - name: Build for aarch64-unknown-linux-musl
       run: cargo build --release --target aarch64-unknown-linux-musl -vv
 
-    # 由于 Cargo.toml 中 strip = true，二进制已被裁剪，无需额外 strip
     - name: Check binary info
       run: |
         file target/aarch64-unknown-linux-musl/release/iptv-proxy
