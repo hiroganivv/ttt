@@ -5,8 +5,9 @@ edition = "2021"
 authors = ["IPTV Proxy Team"]
 
 [dependencies]
-pingora = { version = "0.4", default-features = false, features = ["lb", "openssl"] }
-pingora-core = { version = "0.4", default-features = false }
+# 使用 Git 提交 d9e6d7a（pingora 0.8.0），已兼容 sfv 0.15
+pingora = { git = "https://github.com/cloudflare/pingora", rev = "d9e6d7a", default-features = false, features = ["lb", "rustls"] }
+pingora-core = { git = "https://github.com/cloudflare/pingora", rev = "d9e6d7a", default-features = false }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 bytes = "1"
@@ -20,10 +21,7 @@ memchr = "2"
 num_cpus = "1"
 http = "1"
 
-# 强制锁定 sfv 版本，解决 pingora-core 0.4.0 编译错误
-sfv = "=0.12.0"
-# vendored OpenSSL 自动从源码编译，适合 musl 交叉编译
-openssl = { version = "0.10", features = ["vendored"] }
+# 不再需要 sfv 锁定，也不再需要 vendored openssl（使用 rustls）
 
 [profile.release]
 opt-level = 3
