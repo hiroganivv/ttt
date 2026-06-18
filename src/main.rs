@@ -108,7 +108,7 @@ impl IptvProxy {
         host.contains("surrit.com") || host.contains("fourhoi.com")
     }
 
-    /// 修改后的内部重定向跟随，返回 (最终URL, 状态码, 响应头, 响应体)
+    /// 内部重定向跟随，返回 (最终URL, 状态码, 响应头, 响应体)
     async fn follow_redirects(
         client: &reqwest::Client,
         url: String,
@@ -136,7 +136,6 @@ impl IptvProxy {
             .map_err(|e| Error::explain(ErrorType::InternalError, format!("Redirect request failed: {e}")))?;
 
         let status = resp.status().as_u16();
-        // 对于重定向，递归调用并返回递归结果
         if status == 301 || status == 302 || status == 307 || status == 308 {
             if let Some(location) = resp.headers().get("location") {
                 let loc = location.to_str().map_err(|_| {
@@ -158,7 +157,6 @@ impl IptvProxy {
             }
         }
 
-        // 非重定向，记录当前最终 URL（即当前请求的 URL）
         let final_url = url;
         let headers: HashMap<String, String> = resp
             .headers()
@@ -421,7 +419,8 @@ impl ProxyHttp for IptvProxy {
                                         if let Some(last_slash) = final_url.rfind('/') {
                                             ctx.base_url = Some(final_url[..last_slash + 1].to_string());
                                         } else {
-                                            ctx.base_url = Some(final_url);
+                                            // 修复：克隆 final_url 以避免所有权转移后仍被使用
+                                            ctx.base_url = Some(final_url.clone());
                                         }
                                     }
                                 }
@@ -471,7 +470,7 @@ impl ProxyHttp for IptvProxy {
         _end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        // 如果存在缓存的 body（来自内部重定向），先设置为当前 body
+        // 如果有缓存的 body（来自内部重定向），先设置为当前 body
         if let Some(cached) = ctx.cached_body.take() {
             *body = Some(cached);
             // 如果需要重写，不要提前返回；如果不需要，可以直接返回
