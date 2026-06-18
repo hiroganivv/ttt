@@ -198,8 +198,6 @@ impl ProxyHttp for IptvProxy {
 
         if ctx.is_m3u8 {
             upstream_response.remove_header("Content-Length");
-            // Pingora automatically calls response_body_filter when implemented,
-            // no need to enable it manually.
         }
 
         Ok(())
@@ -332,6 +330,8 @@ fn main() {
     server.bootstrap();
 
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
+    // ⭐ 必须显式启用响应体过滤，否则 response_body_filter 不会被调用
+    proxy_service.set_response_body_filter(true);
     proxy_service.add_tcp(&bind_addr);
     server.add_service(proxy_service);
 
