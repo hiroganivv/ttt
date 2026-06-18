@@ -23,7 +23,6 @@ static PROXY_PATH_REGEX: Lazy<Regex> = Lazy::new(|| {
 
 const REFERER_VALUE: &str = "https://missav.ws/dm242/cn";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-const MAX_REDIRECT_DEPTH: u8 = 5;
 
 // ━━━━━━━━━━━━ 配置 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -59,9 +58,6 @@ pub struct ProxyContext {
     needs_rewrite_surrit: bool,
     base_url: Option<String>,
     needs_jpeg_fix: bool,
-    cached_body: Option<Bytes>,
-    cached_headers: Option<HashMap<String, String>>,
-    cached_status: Option<u16>,
 }
 
 impl ProxyContext {
@@ -75,9 +71,6 @@ impl ProxyContext {
             needs_rewrite_surrit: false,
             base_url: None,
             needs_jpeg_fix: false,
-            cached_body: None,
-            cached_headers: None,
-            cached_status: None,
         }
     }
 }
@@ -87,91 +80,18 @@ impl ProxyContext {
 pub struct IptvProxy {
     config: ProxyConfig,
     finder: memmem::Finder<'static>,
-    client: reqwest::Client,
 }
 
 impl IptvProxy {
     pub fn new(config: ProxyConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("Failed to build reqwest client");
         Self {
             config,
             finder: memmem::Finder::new(M3U8_NEEDLE),
-            client,
         }
     }
 
     fn host_needs_referer(host: &str) -> bool {
         host.contains("surrit.com") || host.contains("fourhoi.com")
-    }
-
-    /// 内部重定向跟随，返回 (最终URL, 状态码, 响应头, 响应体)
-    async fn follow_redirects(
-        client: &reqwest::Client,
-        url: String,
-        depth: u8,
-    ) -> Result<(String, u16, HashMap<String, String>, Bytes)> {
-        if depth == 0 {
-            return Err(Error::explain(
-                ErrorType::InternalError,
-                "Too many redirects",
-            ));
-        }
-
-        let mut request = client.get(&url);
-        if let Ok(parsed) = url::Url::parse(&url) {
-            if Self::host_needs_referer(parsed.host_str().unwrap_or("")) {
-                request = request
-                    .header("Referer", REFERER_VALUE)
-                    .header("User-Agent", USER_AGENT);
-            }
-        }
-
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| Error::explain(ErrorType::InternalError, format!("Redirect request failed: {e}")))?;
-
-        let status = resp.status().as_u16();
-        if status == 301 || status == 302 || status == 307 || status == 308 {
-            if let Some(location) = resp.headers().get("location") {
-                let loc = location.to_str().map_err(|_| {
-                    Error::explain(ErrorType::InternalError, "Invalid Location header")
-                })?;
-                let new_url = if loc.starts_with("http://") || loc.starts_with("https://") {
-                    loc.to_string()
-                } else {
-                    let base = url::Url::parse(&url).map_err(|_| {
-                        Error::explain(ErrorType::InternalError, "Invalid base URL")
-                    })?;
-                    base.join(loc)
-                        .map_err(|_| {
-                            Error::explain(ErrorType::InternalError, "Failed to resolve relative URL")
-                        })?
-                        .to_string()
-                };
-                return Box::pin(Self::follow_redirects(client, new_url, depth - 1)).await;
-            }
-        }
-
-        let final_url = url;
-        let headers: HashMap<String, String> = resp
-            .headers()
-            .iter()
-            .filter_map(|(k, v)| {
-                v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string()))
-            })
-            .collect();
-
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::explain(ErrorType::InternalError, format!("Read body failed: {e}")))?;
-
-        Ok((final_url, status, headers, body))
     }
 }
 
@@ -382,77 +302,28 @@ impl ProxyHttp for IptvProxy {
     ) -> Result<()> {
         let status = upstream_response.status;
         if status == 301 || status == 302 || status == 307 || status == 308 {
-            let maybe_loc = upstream_response
+            if let Some(loc_str) = upstream_response
                 .headers
                 .get("location")
                 .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
-
-            if let Some(loc_str) = maybe_loc {
-                info!("Upstream returned redirect ({}), following internally...", status);
-
-                let loc_for_fallback = loc_str.clone();
-                match Self::follow_redirects(&self.client, loc_str, MAX_REDIRECT_DEPTH).await {
-                    Ok((final_url, final_status, headers, body)) => {
-                        upstream_response.set_status(final_status);
-                        upstream_response.headers.clear();
-                        for (k, v) in &headers {
-                            if k.to_lowercase() != "content-length" {
-                                if let Err(e) = upstream_response.insert_header(k.clone(), v) {
-                                    warn!("Failed to set header {}: {}", k, e);
-                                }
-                            }
-                        }
-                        ctx.cached_body = Some(body);
-                        ctx.cached_status = Some(final_status);
-                        ctx.cached_headers = Some(headers);
-
-                        // 根据最终URL更新上下文，以便后续重写
-                        if let Ok(new_url) = url::Url::parse(&final_url) {
-                            ctx.target_url = Some(new_url.clone());
-                            let is_m3u8 = final_url.ends_with(".m3u8");
-                            match ctx.route_mode {
-                                RouteMode::AntiLeechQuery => {
-                                    ctx.is_m3u8 = is_m3u8;
-                                    ctx.needs_rewrite_surrit = is_m3u8;
-                                    if is_m3u8 {
-                                        if let Some(last_slash) = final_url.rfind('/') {
-                                            ctx.base_url = Some(final_url[..last_slash + 1].to_string());
-                                        } else {
-                                            // 修复：克隆 final_url 以避免所有权转移后仍被使用
-                                            ctx.base_url = Some(final_url.clone());
-                                        }
-                                    }
-                                }
-                                RouteMode::IptvDirect => {
-                                    ctx.is_m3u8 = is_m3u8;
-                                    let host = new_url.host_str().unwrap_or("");
-                                    ctx.needs_rewrite_iptv = is_m3u8 && host.contains("116.199");
-                                }
-                                _ => {}
-                            }
-                        }
-
-                        info!("Internal redirect succeeded, final URL: {}, status: {}", final_url, final_status);
+                .map(|s| s.to_string())
+            {
+                info!("Upstream returned redirect ({}), rewriting Location...", status);
+                // 改写 Location 为对应的代理地址，客户端会自动跟随
+                let new_loc = match ctx.route_mode {
+                    RouteMode::AntiLeechQuery => {
+                        let encoded = urlencoding::encode(&loc_str);
+                        format!("/?url={}", encoded)
                     }
-                    Err(e) => {
-                        error!("Internal redirect failed: {:?}", e);
-                        let new_loc = match ctx.route_mode {
-                            RouteMode::AntiLeechQuery => {
-                                let encoded = urlencoding::encode(&loc_for_fallback);
-                                format!("/?url={}", encoded)
-                            }
-                            RouteMode::IptvDirect => {
-                                format!("/iptv/{}", loc_for_fallback)
-                            }
-                            RouteMode::ProxyPath => {
-                                format!("/iptv/{}", loc_for_fallback)
-                            }
-                        };
-                        upstream_response.insert_header("Location", &new_loc)?;
-                        info!("Fallback to client-side redirect: {} -> {}", loc_for_fallback, new_loc);
+                    RouteMode::IptvDirect => {
+                        format!("/iptv/{}", loc_str)
                     }
-                }
+                    RouteMode::ProxyPath => {
+                        format!("/iptv/{}", loc_str)
+                    }
+                };
+                upstream_response.insert_header("Location", &new_loc)?;
+                info!("Rewritten Location: {} -> {}", loc_str, new_loc);
             }
         }
 
@@ -470,15 +341,6 @@ impl ProxyHttp for IptvProxy {
         _end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        // 如果有缓存的 body（来自内部重定向），先设置为当前 body
-        if let Some(cached) = ctx.cached_body.take() {
-            *body = Some(cached);
-            // 如果需要重写，不要提前返回；如果不需要，可以直接返回
-            if !ctx.needs_rewrite_iptv && !ctx.needs_rewrite_surrit {
-                return Ok(None);
-            }
-        }
-
         if let Some(bytes) = body.as_mut() {
             if ctx.needs_rewrite_iptv && self.finder.find(bytes).is_some() {
                 if let Ok(content) = std::str::from_utf8(bytes) {
