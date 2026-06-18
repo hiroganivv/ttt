@@ -265,29 +265,44 @@ impl ProxyHttp for IptvProxy {
 
         if let Some(url_param) = query.split('&').find(|p| p.starts_with("url=")) {
             let encoded = &url_param[4..];
-            if let Ok(decoded) = urlencoding::decode(encoded) {
-                let decoded_str = decoded.to_string();
-                info!("Decoded anti-leech URL: {}", decoded_str);
+            match urlencoding::decode(encoded) {
+                Ok(decoded) => {
+                    let decoded_str = decoded.to_string();
+                    info!("Decoded anti-leech URL: {}", decoded_str);
 
-                if let Ok(url) = url::Url::parse(&decoded_str) {
-                    let host = url.host_str().unwrap_or("surrit.com").to_string();
-                    let path_bytes = url.path().as_bytes().to_vec();
+                    if let Ok(url) = url::Url::parse(&decoded_str) {
+                        let host = url.host_str().unwrap_or("surrit.com").to_string();
+                        let path_bytes = url.path().as_bytes().to_vec();
 
-                    ctx.route_mode = RouteMode::AntiLeechQuery;
-                    ctx.target_url = Some(url);
-                    ctx.is_m3u8 = decoded_str.ends_with(".m3u8");
-                    ctx.needs_referer = true;
-                    ctx.needs_rewrite_surrit = ctx.is_m3u8;
+                        ctx.route_mode = RouteMode::AntiLeechQuery;
+                        ctx.target_url = Some(url);
+                        ctx.is_m3u8 = decoded_str.ends_with(".m3u8");
+                        ctx.needs_referer = true;
+                        ctx.needs_rewrite_surrit = ctx.is_m3u8;
 
-                    if let Some(last_slash) = decoded_str.rfind('/') {
-                        ctx.base_url = Some(decoded_str[..last_slash + 1].to_string());
+                        if let Some(last_slash) = decoded_str.rfind('/') {
+                            ctx.base_url = Some(decoded_str[..last_slash + 1].to_string());
+                        } else {
+                            ctx.base_url = Some(decoded_str);
+                        }
+
+                        session.req_header_mut().set_raw_path(&path_bytes)?;
+                        session.req_header_mut().insert_header("Host", &host)?;
+                        return Ok(false);
                     } else {
-                        ctx.base_url = Some(decoded_str);
+                        warn!("Failed to parse decoded URL: {}", decoded_str);
+                        return Err(Error::explain(
+                            ErrorType::HTTPStatus(400),
+                            "Invalid target URL in url parameter",
+                        ));
                     }
-
-                    session.req_header_mut().set_raw_path(&path_bytes)?;
-                    session.req_header_mut().insert_header("Host", &host)?;
-                    return Ok(false);
+                }
+                Err(e) => {
+                    warn!("Failed to decode url parameter '{}': {}", encoded, e);
+                    return Err(Error::explain(
+                        ErrorType::HTTPStatus(400),
+                        "The 'url' parameter must be URL-encoded. Special characters like ':', '/', '?', '&' need to be percent-encoded (e.g., %3A, %2F, %3F, %26)",
+                    ));
                 }
             }
         }
@@ -381,7 +396,6 @@ impl ProxyHttp for IptvProxy {
                 let loc_for_fallback = loc_str.clone();
                 match Self::follow_redirects(&self.client, loc_str, MAX_REDIRECT_DEPTH).await {
                     Ok((final_url, final_status, headers, body)) => {
-                        // 更新响应头
                         upstream_response.set_status(final_status);
                         upstream_response.headers.clear();
                         for (k, v) in &headers {
@@ -395,10 +409,10 @@ impl ProxyHttp for IptvProxy {
                         ctx.cached_status = Some(final_status);
                         ctx.cached_headers = Some(headers);
 
-                        // ★ 根据最终URL更新上下文，以便后续重写
+                        // 根据最终URL更新上下文，以便后续重写
                         if let Ok(new_url) = url::Url::parse(&final_url) {
                             ctx.target_url = Some(new_url.clone());
-                            let is_m3u8 = final_url.ends_with(".m3u8"); // 简单判断，也可以基于 path
+                            let is_m3u8 = final_url.ends_with(".m3u8");
                             match ctx.route_mode {
                                 RouteMode::AntiLeechQuery => {
                                     ctx.is_m3u8 = is_m3u8;
@@ -416,7 +430,6 @@ impl ProxyHttp for IptvProxy {
                                     let host = new_url.host_str().unwrap_or("");
                                     ctx.needs_rewrite_iptv = is_m3u8 && host.contains("116.199");
                                 }
-                                // ProxyPath 一般不涉及重写，但如果有需要可以扩展
                                 _ => {}
                             }
                         }
@@ -599,7 +612,7 @@ fn main() {
     info!("Usage:");
     info!("  IPTV:   http://<ip>:8080/iptv/http://116.199.x.x/path/file.m3u8");
     info!("  TS:     http://<ip>:8080/proxy/116.199.x.x:port/path/file.ts");
-    info!("  Leech:  http://<ip>:8080/?url=https://surrit.com/.../playlist.m3u8");
+    info!("  Leech:  http://<ip>:8080/?url=<URL-encoded playlist>");
     info!("========================================");
 
     server.run_forever();
