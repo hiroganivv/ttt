@@ -1,7 +1,11 @@
+[package]
+name = "iptv-proxy"
+version = "1.0.0"
+edition = "2021"
+authors = ["IPTV Proxy Team"]
+
 [dependencies]
-# pingora 主 crate，必须开启 proxy feature
 pingora = { git = "https://github.com/cloudflare/pingora", rev = "d9e6d7a", default-features = false, features = ["lb", "proxy", "rustls"] }
-# pingora-core 一般不需要单独声明，但如果需要，请保持 feature 对齐
 pingora-core = { git = "https://github.com/cloudflare/pingora", rev = "d9e6d7a", default-features = false, features = ["rustls"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
@@ -17,3 +21,13 @@ memchr = "2"
 num_cpus = "1"
 http = "1"
 urlencoding = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.release.package."*"]
+opt-level = 3
