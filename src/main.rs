@@ -213,6 +213,14 @@ impl ProxyHttp for IptvProxy {
             }
         }
 
+        // 如果是 jpeg 伪装资源，修正 Content-Type 为 TS 视频流
+        if ctx.needs_jpeg_fix {
+            upstream_response.remove_header("Content-Type");
+            upstream_response.insert_header("Content-Type", "video/mp2t")?;
+            // 移除可能干扰的文件下载头
+            upstream_response.remove_header("Content-Disposition");
+        }
+
         if ctx.is_m3u8 {
             upstream_response.remove_header("Content-Length");
         }
