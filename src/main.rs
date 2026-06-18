@@ -110,7 +110,7 @@ impl IptvProxy {
 
     async fn follow_redirects(
         client: &reqwest::Client,
-        mut url: String,
+        url: String,
         depth: u8,
     ) -> Result<(u16, HashMap<String, String>, Bytes)> {
         if depth == 0 {
@@ -374,6 +374,8 @@ impl ProxyHttp for IptvProxy {
             if let Some(loc_str) = maybe_loc {
                 info!("Upstream returned redirect ({}), following internally...", status);
 
+                // 克隆一份供失败回退使用
+                let loc_for_fallback = loc_str.clone();
                 match Self::follow_redirects(&self.client, loc_str, MAX_REDIRECT_DEPTH).await {
                     Ok((final_status, headers, body)) => {
                         upstream_response.set_status(final_status);
@@ -392,21 +394,21 @@ impl ProxyHttp for IptvProxy {
                     }
                     Err(e) => {
                         error!("Internal redirect failed: {:?}", e);
-                        // 回退到客户端侧重定向
+                        // 回退：改写 Location 返回给客户端
                         let new_loc = match ctx.route_mode {
                             RouteMode::AntiLeechQuery => {
-                                let encoded = urlencoding::encode(&loc_str);
+                                let encoded = urlencoding::encode(&loc_for_fallback);
                                 format!("/?url={}", encoded)
                             }
                             RouteMode::IptvDirect => {
-                                format!("/iptv/{}", loc_str)
+                                format!("/iptv/{}", loc_for_fallback)
                             }
                             RouteMode::ProxyPath => {
-                                format!("/iptv/{}", loc_str)
+                                format!("/iptv/{}", loc_for_fallback)
                             }
                         };
                         upstream_response.insert_header("Location", &new_loc)?;
-                        info!("Fallback to client-side redirect: {} -> {}", loc_str, new_loc);
+                        info!("Fallback to client-side redirect: {} -> {}", loc_for_fallback, new_loc);
                     }
                 }
             }
