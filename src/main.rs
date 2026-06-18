@@ -29,6 +29,7 @@ pub struct ProxyContext {
     target_url: Option<url::Url>,
     is_m3u8: bool,
     base_url: Option<String>,
+    origin_base: Option<String>,   // 新增：scheme://host
     needs_jpeg_fix: bool,
 }
 
@@ -38,6 +39,7 @@ impl ProxyContext {
             target_url: None,
             is_m3u8: false,
             base_url: None,
+            origin_base: None,
             needs_jpeg_fix: false,
         }
     }
@@ -93,6 +95,7 @@ impl ProxyHttp for IptvProxy {
             let mut url = url::Url::parse(&decoded_str)
                 .map_err(|e| Error::explain(ErrorType::HTTPStatus(400), format!("invalid URL: {e}")))?;
 
+            // 处理 jpeg 伪装
             if url.query_pairs().any(|(k, v)| k == "real_ext" && v == "jpeg") {
                 ctx.needs_jpeg_fix = true;
                 let clean: Vec<_> = url
@@ -109,12 +112,18 @@ impl ProxyHttp for IptvProxy {
             ctx.target_url = Some(url.clone());
             ctx.is_m3u8 = decoded_str.ends_with(".m3u8");
 
+            // 保存路径前缀（目录）
             if let Some(last_slash) = decoded_str.rfind('/') {
                 ctx.base_url = Some(decoded_str[..=last_slash].to_string());
             } else {
                 ctx.base_url = Some(decoded_str.clone());
             }
 
+            // 新增：保存 origin base (scheme://host)
+            let origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or("localhost"));
+            ctx.origin_base = Some(origin);
+
+            // 修改请求路径，指向原始目标
             let path_bytes = url.path().as_bytes().to_vec();
             session.req_header_mut().set_raw_path(&path_bytes)?;
             session.req_header_mut().insert_header("Host", url.host_str().unwrap_or("localhost"))?;
@@ -218,6 +227,8 @@ impl ProxyHttp for IptvProxy {
                 };
                 let base = ctx.base_url.as_ref()
                     .expect("base_url missing for m3u8 rewrite");
+                let origin_base = ctx.origin_base.as_ref()
+                    .expect("origin_base missing for m3u8 rewrite");
                 let mut new_content = String::with_capacity(content.len());
 
                 for line in content.lines() {
@@ -225,8 +236,11 @@ impl ProxyHttp for IptvProxy {
                         new_content.push_str(line);
                         new_content.push('\n');
                     } else {
+                        // 拼装完整 URL，正确处理相对路径和绝对路径
                         let full_url = if line.starts_with("http://") || line.starts_with("https://") {
                             line.to_string()
+                        } else if line.starts_with('/') {
+                            format!("{}{}", origin_base, line)
                         } else {
                             format!("{}{}", base, line)
                         };
@@ -330,8 +344,8 @@ fn main() {
     server.bootstrap();
 
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
-    // 启用响应体过滤（必须调用 inner_mut() 获取 HttpProxy）
-    proxy_service.inner_mut().set_response_body_filter(true);
+    // 修复：使用 app_mut() 代替 inner_mut()
+    proxy_service.app_mut().set_response_body_filter(true);
     proxy_service.add_tcp(&bind_addr);
     server.add_service(proxy_service);
 
