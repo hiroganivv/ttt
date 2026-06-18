@@ -114,20 +114,22 @@ impl ProxyHttp for IptvProxy {
             ctx.target_url = Some(url.clone());
             ctx.is_m3u8 = decoded_str.ends_with(".m3u8");
 
-            // 保存目录前缀（确保以 / 结尾）
-            if let Some(last_slash) = decoded_str.rfind('/') {
-                ctx.base_url = Some(decoded_str[..=last_slash].to_string());
-            } else {
-                ctx.base_url = Some(format!("{}/", decoded_str));
-            }
-
             // 保存 scheme + authority (host:port)
-            ctx.origin_base = Some(format!("{}://{}", url.scheme(), url.authority()));
+            let authority = url.authority().to_string();
+            ctx.origin_base = Some(format!("{}://{}", url.scheme(), authority));
 
-            // 将请求路径指向原始目标
+            // 保存目录前缀（基于 URL 的 path，避免查询参数干扰）
+            let path = url.path();              // 如 "/path/to/file.m3u8"
+            let base_path = match path.rfind('/') {
+                Some(pos) => &path[..=pos],     // "/path/to/"
+                None => "/",                    // 理论上 path 至少是 "/"
+            };
+            ctx.base_url = Some(format!("{}://{}{}", url.scheme(), authority, base_path));
+
+            // 修改代理请求的路径和 Host（后续 upstream_request_filter 会再次处理完整 URI）
             let path_bytes = url.path().as_bytes().to_vec();
             session.req_header_mut().set_raw_path(&path_bytes)?;
-            session.req_header_mut().insert_header("Host", url.host_str().unwrap_or("localhost"))?;
+            session.req_header_mut().insert_header("Host", &authority)?;
             return Ok(false);
         }
 
@@ -170,11 +172,8 @@ impl ProxyHttp for IptvProxy {
             .map_err(|e| Error::explain(ErrorType::InternalError, format!("URI: {e}")))?;
         upstream_request.set_uri(uri);
 
-        let host_value = match url.port() {
-            Some(port) => format!("{}:{}", url.host_str().unwrap(), port),
-            None => url.host_str().unwrap().to_string(),
-        };
-        upstream_request.insert_header("Host", &host_value)?;
+        // 直接用 authority 设置 Host 头（包含非默认端口）
+        upstream_request.insert_header("Host", url.authority())?;
 
         upstream_request.insert_header("Referer", REFERER_VALUE)?;
         upstream_request.insert_header("User-Agent", USER_AGENT)?;
@@ -201,13 +200,13 @@ impl ProxyHttp for IptvProxy {
                 .and_then(|v| v.to_str().ok())
             {
                 let loc_str = loc.to_string();
-                // 尝试将 Location 解析为绝对 URL，如果是相对路径则基于原 target_url 解析
+                // 解析或基于当前 URL 补全为绝对 URL
                 let resolved = if let Ok(abs_url) = url::Url::parse(&loc_str) {
                     abs_url.to_string()
                 } else if let Some(base) = &ctx.target_url {
-                    base.join(&loc_str).map(|u| u.to_string()).unwrap_or(loc_str)
+                    base.join(&loc_str).map(|u| u.to_string()).unwrap_or_else(|_| loc_str.clone())
                 } else {
-                    loc_str
+                    loc_str.clone()
                 };
                 let new_loc = format!("/?url={}", urlencoding::encode(&resolved));
                 upstream_response.insert_header("Location", &new_loc)?;
@@ -246,7 +245,7 @@ impl ProxyHttp for IptvProxy {
                         new_content.push_str(line);
                         new_content.push('\n');
                     } else {
-                        // 正确拼接完整 URL
+                        // 正确拼接完整 URL（处理绝对/相对路径）
                         let full_url = if line.starts_with("http://") || line.starts_with("https://") {
                             line.to_string()
                         } else if line.starts_with('/') {
@@ -328,10 +327,6 @@ fn main() {
 
     let local_ip = std::env::var("LOCAL_IP").unwrap_or_else(|_| "192.168.1.3".to_string());
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let workers = std::env::var("WORKERS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| num_cpus::get());
     let bind_port: u16 = bind_addr
         .split(':')
         .nth(1)
@@ -340,7 +335,6 @@ fn main() {
 
     info!("Local IP: {}", local_ip);
     info!("Bind: {}", bind_addr);
-    info!("Workers: {}", workers);
 
     let config = ProxyConfig::new(local_ip.clone(), bind_port);
     let mut server = Server::new(Some(Opt {
@@ -353,15 +347,12 @@ fn main() {
     .expect("Failed to create server");
     server.bootstrap();
 
-    // 应用 workers 配置
-    server.configuration.worker_threads = workers.into();
-
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
-    // 解包 app_logic_mut() 返回的 Option
+    // 启用响应体过滤（当前版本正确方法名）
     proxy_service
         .app_logic_mut()
         .expect("HttpProxy not initialized")
-        .set_response_body_filter(true);
+        .enable_response_body_filter(true);
     proxy_service.add_tcp(&bind_addr);
     server.add_service(proxy_service);
 
