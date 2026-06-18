@@ -10,12 +10,8 @@ use pingora::server::configuration::Opt;
 use pingora::server::Server;
 use std::time::Duration;
 
-// ━━━━━━━━━━━━ 常量 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 const REFERER_VALUE: &str = "https://missav.ws/dm242/cn";
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-// ━━━━━━━━━━━━ 配置 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 #[derive(Clone)]
 pub struct ProxyConfig {
@@ -28,8 +24,6 @@ impl ProxyConfig {
         Self { local_ip, bind_port }
     }
 }
-
-// ━━━━━━━━━━━━ 请求上下文 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
 pub struct ProxyContext {
     target_url: Option<url::Url>,
@@ -48,8 +42,6 @@ impl ProxyContext {
         }
     }
 }
-
-// ━━━━━━━━━━━━ 代理主体 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 pub struct IptvProxy {
     config: ProxyConfig,
@@ -79,16 +71,14 @@ impl ProxyHttp for IptvProxy {
         let query = req.uri.query().unwrap_or("");
 
         if path == "/health" || (path == "/" && query.is_empty()) {
-            let resp = ResponseHeader::build(200, None)
-                .map_err(|e| Error::explain(ErrorType::InternalError, format!("{e}")))?;
+            let resp = ResponseHeader::build(200, None)?;
             session.write_response_header(Box::new(resp), false).await?;
             session.write_response_body(Some(Bytes::from("OK")), true).await?;
             return Ok(true);
         }
 
         if path == "/favicon.ico" {
-            let resp = ResponseHeader::build(404, None)
-                .map_err(|e| Error::explain(ErrorType::InternalError, format!("{e}")))?;
+            let resp = ResponseHeader::build(404, None)?;
             session.write_response_header(Box::new(resp), true).await?;
             return Ok(true);
         }
@@ -131,10 +121,7 @@ impl ProxyHttp for IptvProxy {
             return Ok(false);
         }
 
-        Err(Error::explain(
-            ErrorType::HTTPStatus(400),
-            "Use /?url=<encoded_target>",
-        ))
+        Err(Error::explain(ErrorType::HTTPStatus(400), "Use /?url=<encoded_target>"))
     }
 
     async fn upstream_peer(
@@ -142,23 +129,15 @@ impl ProxyHttp for IptvProxy {
         _session: &mut Session,
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let target = ctx
-            .target_url
-            .as_ref()
+        let target = ctx.target_url.as_ref()
             .ok_or_else(|| Error::explain(ErrorType::InternalError, "No target URL"))?;
 
         let host = target.host_str().unwrap_or("localhost").to_string();
-        let port = target
-            .port()
-            .unwrap_or(if target.scheme() == "https" { 443 } else { 80 });
+        let port = target.port().unwrap_or(if target.scheme() == "https" { 443 } else { 80 });
         let is_https = target.scheme() == "https";
 
         info!("Upstream: {}:{} (TLS: {})", host, port, is_https);
-        Ok(Box::new(HttpPeer::new(
-            (host.clone(), port),
-            is_https,
-            host,
-        )))
+        Ok(Box::new(HttpPeer::new((host.clone(), port), is_https, host)))
     }
 
     async fn upstream_request_filter(
@@ -167,9 +146,7 @@ impl ProxyHttp for IptvProxy {
         upstream_request: &mut RequestHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        let url = ctx
-            .target_url
-            .as_ref()
+        let url = ctx.target_url.as_ref()
             .ok_or_else(|| Error::explain(ErrorType::InternalError, "No target"))?;
 
         let mut path_and_query = match url.query() {
@@ -179,10 +156,7 @@ impl ProxyHttp for IptvProxy {
         if ctx.needs_jpeg_fix {
             path_and_query = path_and_query.replace(".ts", ".jpeg");
         }
-        upstream_request.set_uri(
-            Uri::try_from(path_and_query)
-                .map_err(|e| Error::explain(ErrorType::InternalError, format!("URI: {e}")))?,
-        );
+        upstream_request.set_uri(Uri::try_from(path_and_query)?);
 
         let host_value = match url.port() {
             Some(port) => format!("{}:{}", url.host_str().unwrap(), port),
@@ -203,15 +177,14 @@ impl ProxyHttp for IptvProxy {
 
     async fn response_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
         let status = upstream_response.status;
+
         if status == 301 || status == 302 || status == 307 || status == 308 {
-            if let Some(loc) = upstream_response
-                .headers
-                .get("location")
+            if let Some(loc) = upstream_response.headers.get("location")
                 .and_then(|v| v.to_str().ok())
             {
                 let loc_str = loc.to_string();
@@ -222,6 +195,7 @@ impl ProxyHttp for IptvProxy {
         }
 
         if ctx.is_m3u8 {
+            session.set_response_body_filter(true);       // 开启体过滤
             upstream_response.remove_header("Content-Length");
         }
 
@@ -241,9 +215,7 @@ impl ProxyHttp for IptvProxy {
                     Ok(s) => s.to_string(),
                     Err(_) => return Ok(None),
                 };
-                let base = ctx
-                    .base_url
-                    .as_ref()
+                let base = ctx.base_url.as_ref()
                     .expect("base_url missing for m3u8 rewrite");
                 let mut new_content = String::with_capacity(content.len());
 
@@ -252,12 +224,11 @@ impl ProxyHttp for IptvProxy {
                         new_content.push_str(line);
                         new_content.push('\n');
                     } else {
-                        let full_url =
-                            if line.starts_with("http://") || line.starts_with("https://") {
-                                line.to_string()
-                            } else {
-                                format!("{}{}", base, line)
-                            };
+                        let full_url = if line.starts_with("http://") || line.starts_with("https://") {
+                            line.to_string()
+                        } else {
+                            format!("{}{}", base, line)
+                        };
 
                         if full_url.ends_with(".jpeg") {
                             let ts_url = full_url.replace(".jpeg", ".ts");
