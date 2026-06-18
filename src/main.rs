@@ -119,7 +119,7 @@ impl ProxyHttp for IptvProxy {
         // 健康检查
         if path == "/health" || (path == "/" && !query.contains("url=")) {
             let resp = ResponseHeader::build(200, None)
-                .map_err(|e| Error::explain(ErrorType::InternalError, e))?;
+                .map_err(|e| Error::explain(ErrorType::InternalError, format!("{e}")))?; // 修复
             session.write_response_header(Box::new(resp), false).await?;
             session.write_response_body(Some(Bytes::from("OK")), true).await?;
             return Ok(true);
@@ -128,7 +128,7 @@ impl ProxyHttp for IptvProxy {
         // favicon
         if path == "/favicon.ico" {
             let resp = ResponseHeader::build(404, None)
-                .map_err(|e| Error::explain(ErrorType::InternalError, e))?;
+                .map_err(|e| Error::explain(ErrorType::InternalError, format!("{e}")))?; // 修复
             session.write_response_header(Box::new(resp), true).await?;
             return Ok(true);
         }
@@ -140,7 +140,7 @@ impl ProxyHttp for IptvProxy {
             let url_str = path.strip_prefix("/iptv/").unwrap();
             let full = if query.is_empty() { url_str.to_string() } else { format!("{}?{}", url_str, query) };
             let mut url = url::Url::parse(&full)
-                .map_err(|e| Error::explain(ErrorType::HTTPStatus(400), format!("Invalid URL: {}", e)))?;
+                .map_err(|e| Error::explain(ErrorType::HTTPStatus(400), format!("Invalid URL: {e}")))?;
 
             // 处理 real_ext=jpeg 参数（surrit 反盗链扩展名修正）
             if url.query_pairs().any(|(k, v)| k == "real_ext" && v == "jpeg") {
@@ -224,7 +224,7 @@ impl ProxyHttp for IptvProxy {
 
     async fn upstream_peer(
         &self,
-        session: &mut Session,
+        _session: &mut Session,   // 修复：未使用变量加下划线
         ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
         let target = ctx.target_url.as_ref().ok_or_else(|| {
@@ -261,7 +261,7 @@ impl ProxyHttp for IptvProxy {
             }
 
             let uri = Uri::try_from(path_and_query)
-                .map_err(|e| Error::explain(ErrorType::InternalError, format!("Invalid URI: {}", e)))?;
+                .map_err(|e| Error::explain(ErrorType::InternalError, format!("Invalid URI: {e}")))?;
             upstream_request.set_uri(uri);
         }
 
@@ -302,24 +302,29 @@ impl ProxyHttp for IptvProxy {
         // 重定向修复：根据原始入口生成正确的 Location
         let status = upstream_response.status;
         if status == 301 || status == 302 || status == 307 || status == 308 {
-            if let Some(loc) = upstream_response.headers.get("location") {
-                if let Ok(loc_str) = loc.to_str() {
-                    let new_loc = match ctx.route_mode {
-                        RouteMode::AntiLeechQuery => {
-                            let encoded = urlencoding::encode(loc_str);
-                            format!("/?url={}", encoded)
-                        }
-                        RouteMode::IptvDirect => {
-                            format!("/iptv/{}", loc_str)
-                        }
-                        RouteMode::ProxyPath => {
-                            // 保守处理，直接用 /iptv/ 代理
-                            format!("/iptv/{}", loc_str)
-                        }
-                    };
-                    upstream_response.insert_header("Location", &new_loc)?;
-                    info!("Rewrite redirect (mode={:?}): {} -> {}", ctx.route_mode, loc_str, new_loc);
-                }
+            // 先提取 Location 值，避免借用冲突
+            let maybe_loc = upstream_response
+                .headers
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            if let Some(loc_str) = maybe_loc {
+                let new_loc = match ctx.route_mode {
+                    RouteMode::AntiLeechQuery => {
+                        let encoded = urlencoding::encode(&loc_str);
+                        format!("/?url={}", encoded)
+                    }
+                    RouteMode::IptvDirect => {
+                        format!("/iptv/{}", loc_str)
+                    }
+                    RouteMode::ProxyPath => {
+                        // 保守处理，直接用 /iptv/ 代理
+                        format!("/iptv/{}", loc_str)
+                    }
+                };
+                upstream_response.insert_header("Location", &new_loc)?;
+                info!("Rewrite redirect (mode={:?}): {} -> {}", ctx.route_mode, loc_str, new_loc);
             }
         }
 
