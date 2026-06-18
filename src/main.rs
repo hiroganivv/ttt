@@ -12,6 +12,7 @@ use pingora::server::configuration::Opt;
 use pingora::server::Server;
 use regex::Regex;
 use std::time::Duration;
+use urlencoding;          // 补充 use
 
 // ==================== 正则与常量 ====================
 
@@ -55,6 +56,7 @@ pub struct ProxyContext {
     needs_rewrite_iptv: bool,
     needs_rewrite_surrit: bool,
     base_url: Option<String>,
+    // 新增：标记是否需要将 .ts 扩展名还原为 .jpeg（用于 surrit 反盗链）
     needs_jpeg_fix: bool,
 }
 
@@ -176,13 +178,26 @@ impl ProxyHttp for IptvProxy {
                     let mut url = url::Url::parse(&full)
                         .map_err(|e| Error::explain(ErrorType::HTTPStatus(400), format!("Invalid URL: {}", e)))?;
 
-                    // 检查是否有 real_ext 参数（用于 surrit 反盗链的扩展名修正）
-                    if url.query_pairs().any(|(k, v)| k == "real_ext" && v == "jpeg") {
-                        ctx.needs_jpeg_fix = true;
-                        // 删除此参数，避免传递给上游
-                        url.query_pairs_mut().clear();
-                        // 重新构建 query（保留其他参数，但移除 real_ext）
-                        // 更简单的：直接修改 url，移除 real_ext 对
+                    // 检查是否有 real_ext 参数，如果有则标记并移除该参数
+                    {
+                        let has_jpeg_ext = url.query_pairs().any(|(k, v)| k == "real_ext" && v == "jpeg");
+                        if has_jpeg_ext {
+                            ctx.needs_jpeg_fix = true;
+                            // 只移除 real_ext 参数，保留其它参数
+                            let mut new_query = Vec::new();
+                            for (k, v) in url.query_pairs() {
+                                if k != "real_ext" {
+                                    new_query.push((k.into_owned(), v.into_owned()));
+                                }
+                            }
+                            url.query_pairs_mut().clear();
+                            {
+                                let mut pairs = url.query_pairs_mut();
+                                for (k, v) in new_query {
+                                    pairs.append_pair(&k, &v);
+                                }
+                            }
+                        }
                     }
 
                     let host = url.host_str().unwrap_or("localhost").to_string();
@@ -192,6 +207,7 @@ impl ProxyHttp for IptvProxy {
                     ctx.target_url = Some(url.clone());
                     ctx.is_m3u8 = path.contains(".m3u8");
                     ctx.needs_referer = false;
+                    // 根据主机名设置是否需要反盗链头
                     if host.contains("surrit.com") || host.contains("fourhoi.com") {
                         ctx.needs_referer = true;
                     }
@@ -257,6 +273,7 @@ impl ProxyHttp for IptvProxy {
             upstream_request.set_uri(uri);
         }
 
+        // 为 IPTV 模式设置 Host 头
         if let ProxyMode::Iptv = ctx.mode {
             if let Some(url) = &ctx.target_url {
                 let host = url.host_str().unwrap_or("localhost");
@@ -268,6 +285,7 @@ impl ProxyHttp for IptvProxy {
                 };
                 upstream_request.insert_header("Host", &host_value)?;
             }
+            // 反盗链头：如果是 surrit/fourhoi 主机，则添加 Referer 和 UA
             if ctx.needs_referer {
                 upstream_request.insert_header("Referer", REFERER_VALUE)?;
                 upstream_request.insert_header("User-Agent", USER_AGENT)?;
@@ -300,31 +318,25 @@ impl ProxyHttp for IptvProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
+        // 处理重定向
         let status = upstream_response.status;
         if status == 301 || status == 302 || status == 307 || status == 308 {
             let new_loc = if let Some(loc) = upstream_response.headers.get("location") {
                 if let Ok(loc_str) = loc.to_str() {
                     let loc_str_owned = loc_str.to_string();
-                    // 尝试解析为完整 URL，若为 116.199.x.x 则使用 ?url= 格式，否则维持 /iptv/ 代理
-                    if let Ok(parsed_url) = url::Url::parse(&loc_str_owned) {
-                        if parsed_url.host_str().unwrap_or("").starts_with("116.199.") {
+                    let new_loc = match ctx.mode {
+                        ProxyMode::AntiLeech => {
+                            // 保持 ?url= 模式，将 Location 编码后作为 url 参数
                             let encoded = urlencoding::encode(&loc_str_owned);
-                            info!(
-                                "Rewrite redirect for 116.199.x.x: {} → /?url={}",
-                                loc_str_owned, encoded
-                            );
-                            Some(format!("/?url={}", encoded))
-                        } else {
-                            let new_loc = format!("/iptv/{}", loc_str_owned);
-                            info!("Rewrite redirect: {} -> {}", loc_str_owned, new_loc);
-                            Some(new_loc)
+                            format!("/?url={}", encoded)
                         }
-                    } else {
-                        // 无法解析为完整 URL（可能是相对路径），仍用 /iptv/ 代理
-                        let new_loc = format!("/iptv/{}", loc_str_owned);
-                        info!("Rewrite redirect (relative): {} -> {}", loc_str_owned, new_loc);
-                        Some(new_loc)
-                    }
+                        ProxyMode::Iptv => {
+                            // 保持 /iptv/ 前缀
+                            format!("/iptv/{}", loc_str_owned)
+                        }
+                    };
+                    info!("Rewrite redirect location: {} -> {}", loc_str_owned, new_loc);
+                    Some(new_loc)
                 } else {
                     warn!("Invalid Location header encoding");
                     None
@@ -383,6 +395,7 @@ impl ProxyHttp for IptvProxy {
                             if full_url.ends_with(".jpeg") {
                                 let mut ts_url = full_url.clone();
                                 ts_url = ts_url.replace(".jpeg", ".ts");
+                                // 追加 real_ext=jpeg 参数
                                 let separator = if ts_url.contains('?') { "&" } else { "?" };
                                 let fixed_url = format!("{}{}real_ext=jpeg", ts_url, separator);
                                 let proxy_line = format!("http://{}:{}/iptv/{}",
