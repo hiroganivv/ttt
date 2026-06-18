@@ -11,8 +11,8 @@ use pingora::proxy::{ProxyHttp, Session};
 use pingora::server::configuration::Opt;
 use pingora::server::Server;
 use regex::Regex;
-use std::time::Duration;
 use std::collections::HashMap;
+use std::time::Duration;
 
 // ━━━━━━━━━━━━ 常量 & 正则 ━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -59,11 +59,8 @@ pub struct ProxyContext {
     needs_rewrite_surrit: bool,
     base_url: Option<String>,
     needs_jpeg_fix: bool,
-    /// 用于存放服务端跟随重定向后得到的完整响应体
     cached_body: Option<Bytes>,
-    /// 缓存的上游最终响应头（用于替换 302 返回给客户端的头）
     cached_headers: Option<HashMap<String, String>>,
-    /// 缓存的上游最终状态码
     cached_status: Option<u16>,
 }
 
@@ -90,7 +87,6 @@ impl ProxyContext {
 pub struct IptvProxy {
     config: ProxyConfig,
     finder: memmem::Finder<'static>,
-    /// 用于服务端内部重定向请求的 HTTP 客户端
     client: reqwest::Client,
 }
 
@@ -98,7 +94,7 @@ impl IptvProxy {
     pub fn new(config: ProxyConfig) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none()) // 我们自己控制重定向
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build reqwest client");
         Self {
@@ -112,7 +108,6 @@ impl IptvProxy {
         host.contains("surrit.com") || host.contains("fourhoi.com")
     }
 
-    /// 服务端跟随重定向，返回最终的响应信息
     async fn follow_redirects(
         client: &reqwest::Client,
         mut url: String,
@@ -126,7 +121,6 @@ impl IptvProxy {
         }
 
         let mut request = client.get(&url);
-        // 如果目标主机需要反盗链，则加上 Referer 和 UA
         if let Ok(parsed) = url::Url::parse(&url) {
             if Self::host_needs_referer(parsed.host_str().unwrap_or("")) {
                 request = request
@@ -146,7 +140,6 @@ impl IptvProxy {
                 let loc = location.to_str().map_err(|_| {
                     Error::explain(ErrorType::InternalError, "Invalid Location header")
                 })?;
-                // 处理相对路径
                 let new_url = if loc.starts_with("http://") || loc.starts_with("https://") {
                     loc.to_string()
                 } else {
@@ -163,7 +156,6 @@ impl IptvProxy {
             }
         }
 
-        // 收集响应头
         let headers: HashMap<String, String> = resp
             .headers()
             .iter()
@@ -382,32 +374,25 @@ impl ProxyHttp for IptvProxy {
             if let Some(loc_str) = maybe_loc {
                 info!("Upstream returned redirect ({}), following internally...", status);
 
-                // 服务端自动跟随重定向
                 match Self::follow_redirects(&self.client, loc_str, MAX_REDIRECT_DEPTH).await {
                     Ok((final_status, headers, body)) => {
-                        // 将上游响应修改为最终的响应
                         upstream_response.set_status(final_status);
-                        // 清除原有所有头（包括 Location）
                         upstream_response.headers.clear();
                         for (k, v) in &headers {
-                            // skip content-length, we will set it later if needed
                             if k.to_lowercase() != "content-length" {
-                                if let Err(e) = upstream_response.insert_header(k, v) {
+                                if let Err(e) = upstream_response.insert_header(k.clone(), v) {
                                     warn!("Failed to set header {}: {}", k, e);
                                 }
                             }
                         }
-                        // 缓存 body，后续在 body_filter 中替换
                         ctx.cached_body = Some(body);
-                        // 记录最终状态，确保 body_filter 知道需要替换
                         ctx.cached_status = Some(final_status);
                         ctx.cached_headers = Some(headers);
                         info!("Internal redirect succeeded, final status: {}", final_status);
                     }
                     Err(e) => {
                         error!("Internal redirect failed: {:?}", e);
-                        // 回退到透传 302（但会保持原 Location 或修改后的）
-                        // 此处选择修改 Location 返回给客户端
+                        // 回退到客户端侧重定向
                         let new_loc = match ctx.route_mode {
                             RouteMode::AntiLeechQuery => {
                                 let encoded = urlencoding::encode(&loc_str);
@@ -427,7 +412,6 @@ impl ProxyHttp for IptvProxy {
             }
         }
 
-        // 对于非重定向最终响应，也需要清理 Content-Length（因为 body 可能被改写）
         if ctx.needs_rewrite_iptv || ctx.needs_rewrite_surrit {
             upstream_response.remove_header("Content-Length");
         }
@@ -439,13 +423,11 @@ impl ProxyHttp for IptvProxy {
         &self,
         _session: &mut Session,
         body: &mut Option<Bytes>,
-        end_of_stream: bool,
+        _end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
-        // 如果存在内部重定向获得的缓存 body，则用它替换原始 body
         if let Some(cached) = ctx.cached_body.take() {
             *body = Some(cached);
-            // 如果还有后续数据（通常不会），忽略掉
             return Ok(None);
         }
 
