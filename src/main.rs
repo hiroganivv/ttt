@@ -347,8 +347,11 @@ fn main() {
     server.bootstrap();
 
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
-    // 使用 app_logic_mut() 以兼容当前 pingora 版本
-    proxy_service.app_logic_mut().set_response_body_filter(true);
+    // 修复：解包 app_logic_mut() 返回的 Option
+    proxy_service
+        .app_logic_mut()
+        .expect("HttpProxy not initialized")
+        .set_response_body_filter(true);
     proxy_service.add_tcp(&bind_addr);
     server.add_service(proxy_service);
 
