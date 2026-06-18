@@ -118,15 +118,15 @@ impl ProxyHttp for IptvProxy {
             let authority = url.authority().to_string();
             ctx.origin_base = Some(format!("{}://{}", url.scheme(), authority));
 
-            // 保存目录前缀（基于 URL 的 path，避免查询参数干扰）
-            let path = url.path();              // 如 "/path/to/file.m3u8"
+            // 正确截取目录前缀（基于 URL path，避免 :// 干扰）
+            let path = url.path();
             let base_path = match path.rfind('/') {
-                Some(pos) => &path[..=pos],     // "/path/to/"
-                None => "/",                    // 理论上 path 至少是 "/"
+                Some(pos) => &path[..=pos],
+                None => "/",
             };
             ctx.base_url = Some(format!("{}://{}{}", url.scheme(), authority, base_path));
 
-            // 修改代理请求的路径和 Host（后续 upstream_request_filter 会再次处理完整 URI）
+            // 修改请求路径和 Host（为上游连接做准备）
             let path_bytes = url.path().as_bytes().to_vec();
             session.req_header_mut().set_raw_path(&path_bytes)?;
             session.req_header_mut().insert_header("Host", &authority)?;
@@ -172,7 +172,7 @@ impl ProxyHttp for IptvProxy {
             .map_err(|e| Error::explain(ErrorType::InternalError, format!("URI: {e}")))?;
         upstream_request.set_uri(uri);
 
-        // 直接用 authority 设置 Host 头（包含非默认端口）
+        // 使用 authority 设置 Host（含端口）
         upstream_request.insert_header("Host", url.authority())?;
 
         upstream_request.insert_header("Referer", REFERER_VALUE)?;
@@ -194,13 +194,12 @@ impl ProxyHttp for IptvProxy {
     ) -> Result<()> {
         let status = upstream_response.status;
 
-        // 重定向改写：处理相对/绝对路径
+        // 重定向改写
         if status == 301 || status == 302 || status == 307 || status == 308 {
             if let Some(loc) = upstream_response.headers.get("location")
                 .and_then(|v| v.to_str().ok())
             {
                 let loc_str = loc.to_string();
-                // 解析或基于当前 URL 补全为绝对 URL
                 let resolved = if let Ok(abs_url) = url::Url::parse(&loc_str) {
                     abs_url.to_string()
                 } else if let Some(base) = &ctx.target_url {
@@ -245,7 +244,6 @@ impl ProxyHttp for IptvProxy {
                         new_content.push_str(line);
                         new_content.push('\n');
                     } else {
-                        // 正确拼接完整 URL（处理绝对/相对路径）
                         let full_url = if line.starts_with("http://") || line.starts_with("https://") {
                             line.to_string()
                         } else if line.starts_with('/') {
@@ -348,11 +346,7 @@ fn main() {
     server.bootstrap();
 
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
-    // 启用响应体过滤（当前版本正确方法名）
-    proxy_service
-        .app_logic_mut()
-        .expect("HttpProxy not initialized")
-        .enable_response_body_filter(true);
+    // 注意：此版本 Pingora 不需要显式启用响应体过滤，实现 response_body_filter 即自动调用
     proxy_service.add_tcp(&bind_addr);
     server.add_service(proxy_service);
 
