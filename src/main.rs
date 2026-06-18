@@ -156,7 +156,9 @@ impl ProxyHttp for IptvProxy {
         if ctx.needs_jpeg_fix {
             path_and_query = path_and_query.replace(".ts", ".jpeg");
         }
-        upstream_request.set_uri(Uri::try_from(path_and_query)?);
+        let uri = Uri::try_from(path_and_query)
+            .map_err(|e| Error::explain(ErrorType::InternalError, format!("URI: {e}")))?;
+        upstream_request.set_uri(uri);
 
         let host_value = match url.port() {
             Some(port) => format!("{}:{}", url.host_str().unwrap(), port),
@@ -177,7 +179,7 @@ impl ProxyHttp for IptvProxy {
 
     async fn response_filter(
         &self,
-        session: &mut Session,
+        _session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
@@ -195,8 +197,9 @@ impl ProxyHttp for IptvProxy {
         }
 
         if ctx.is_m3u8 {
-            session.set_response_body_filter(true);       // 开启体过滤
             upstream_response.remove_header("Content-Length");
+            // Pingora automatically calls response_body_filter when implemented,
+            // no need to enable it manually.
         }
 
         Ok(())
