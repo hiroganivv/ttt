@@ -10,6 +10,7 @@ pingora = { git = "https://github.com/cloudflare/pingora", rev = "d9e6d7a", defa
 pingora-core = { git = "https://github.com/cloudflare/pingora", rev = "d9e6d7a", default-features = false }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 bytes = "1"
 url = "2"
 regex = "1"
