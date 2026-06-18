@@ -28,8 +28,8 @@ impl ProxyConfig {
 pub struct ProxyContext {
     target_url: Option<url::Url>,
     is_m3u8: bool,
-    base_url: Option<String>,      // 目录，如 http://example.com/path/to/
-    origin_base: Option<String>,   // scheme://host，如 http://example.com
+    base_url: Option<String>,      // 目录，如 http://example.com:8080/path/to/
+    origin_base: Option<String>,   // scheme://host:port，如 http://example.com:8080
     needs_jpeg_fix: bool,
 }
 
@@ -114,16 +114,15 @@ impl ProxyHttp for IptvProxy {
             ctx.target_url = Some(url.clone());
             ctx.is_m3u8 = decoded_str.ends_with(".m3u8");
 
-            // 保存目录前缀
+            // 保存目录前缀（确保以 / 结尾）
             if let Some(last_slash) = decoded_str.rfind('/') {
                 ctx.base_url = Some(decoded_str[..=last_slash].to_string());
             } else {
-                ctx.base_url = Some(decoded_str.clone());
+                ctx.base_url = Some(format!("{}/", decoded_str));
             }
 
-            // 保存 scheme + host (origin base)
-            let origin = format!("{}://{}", url.scheme(), url.host_str().unwrap_or("localhost"));
-            ctx.origin_base = Some(origin);
+            // 保存 scheme + authority (host:port)
+            ctx.origin_base = Some(format!("{}://{}", url.scheme(), url.authority()));
 
             // 将请求路径指向原始目标
             let path_bytes = url.path().as_bytes().to_vec();
@@ -196,13 +195,21 @@ impl ProxyHttp for IptvProxy {
     ) -> Result<()> {
         let status = upstream_response.status;
 
-        // 重定向改写
+        // 重定向改写：处理相对/绝对路径
         if status == 301 || status == 302 || status == 307 || status == 308 {
             if let Some(loc) = upstream_response.headers.get("location")
                 .and_then(|v| v.to_str().ok())
             {
                 let loc_str = loc.to_string();
-                let new_loc = format!("/?url={}", urlencoding::encode(&loc_str));
+                // 尝试将 Location 解析为绝对 URL，如果是相对路径则基于原 target_url 解析
+                let resolved = if let Ok(abs_url) = url::Url::parse(&loc_str) {
+                    abs_url.to_string()
+                } else if let Some(base) = &ctx.target_url {
+                    base.join(&loc_str).map(|u| u.to_string()).unwrap_or(loc_str)
+                } else {
+                    loc_str
+                };
+                let new_loc = format!("/?url={}", urlencoding::encode(&resolved));
                 upstream_response.insert_header("Location", &new_loc)?;
                 info!("Rewritten redirect: {} -> {}", loc_str, new_loc);
             }
@@ -346,8 +353,11 @@ fn main() {
     .expect("Failed to create server");
     server.bootstrap();
 
+    // 应用 workers 配置
+    server.configuration.worker_threads = workers.into();
+
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
-    // 修复：解包 app_logic_mut() 返回的 Option
+    // 解包 app_logic_mut() 返回的 Option
     proxy_service
         .app_logic_mut()
         .expect("HttpProxy not initialized")
