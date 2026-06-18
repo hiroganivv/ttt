@@ -108,11 +108,12 @@ impl IptvProxy {
         host.contains("surrit.com") || host.contains("fourhoi.com")
     }
 
+    /// 修改后的内部重定向跟随，返回 (最终URL, 状态码, 响应头, 响应体)
     async fn follow_redirects(
         client: &reqwest::Client,
         url: String,
         depth: u8,
-    ) -> Result<(u16, HashMap<String, String>, Bytes)> {
+    ) -> Result<(String, u16, HashMap<String, String>, Bytes)> {
         if depth == 0 {
             return Err(Error::explain(
                 ErrorType::InternalError,
@@ -135,6 +136,7 @@ impl IptvProxy {
             .map_err(|e| Error::explain(ErrorType::InternalError, format!("Redirect request failed: {e}")))?;
 
         let status = resp.status().as_u16();
+        // 对于重定向，递归调用并返回递归结果
         if status == 301 || status == 302 || status == 307 || status == 308 {
             if let Some(location) = resp.headers().get("location") {
                 let loc = location.to_str().map_err(|_| {
@@ -156,6 +158,8 @@ impl IptvProxy {
             }
         }
 
+        // 非重定向，记录当前最终 URL（即当前请求的 URL）
+        let final_url = url;
         let headers: HashMap<String, String> = resp
             .headers()
             .iter()
@@ -169,7 +173,7 @@ impl IptvProxy {
             .await
             .map_err(|e| Error::explain(ErrorType::InternalError, format!("Read body failed: {e}")))?;
 
-        Ok((status, headers, body))
+        Ok((final_url, status, headers, body))
     }
 }
 
@@ -374,10 +378,10 @@ impl ProxyHttp for IptvProxy {
             if let Some(loc_str) = maybe_loc {
                 info!("Upstream returned redirect ({}), following internally...", status);
 
-                // 克隆一份供失败回退使用
                 let loc_for_fallback = loc_str.clone();
                 match Self::follow_redirects(&self.client, loc_str, MAX_REDIRECT_DEPTH).await {
-                    Ok((final_status, headers, body)) => {
+                    Ok((final_url, final_status, headers, body)) => {
+                        // 更新响应头
                         upstream_response.set_status(final_status);
                         upstream_response.headers.clear();
                         for (k, v) in &headers {
@@ -390,11 +394,37 @@ impl ProxyHttp for IptvProxy {
                         ctx.cached_body = Some(body);
                         ctx.cached_status = Some(final_status);
                         ctx.cached_headers = Some(headers);
-                        info!("Internal redirect succeeded, final status: {}", final_status);
+
+                        // ★ 根据最终URL更新上下文，以便后续重写
+                        if let Ok(new_url) = url::Url::parse(&final_url) {
+                            ctx.target_url = Some(new_url.clone());
+                            let is_m3u8 = final_url.ends_with(".m3u8"); // 简单判断，也可以基于 path
+                            match ctx.route_mode {
+                                RouteMode::AntiLeechQuery => {
+                                    ctx.is_m3u8 = is_m3u8;
+                                    ctx.needs_rewrite_surrit = is_m3u8;
+                                    if is_m3u8 {
+                                        if let Some(last_slash) = final_url.rfind('/') {
+                                            ctx.base_url = Some(final_url[..last_slash + 1].to_string());
+                                        } else {
+                                            ctx.base_url = Some(final_url);
+                                        }
+                                    }
+                                }
+                                RouteMode::IptvDirect => {
+                                    ctx.is_m3u8 = is_m3u8;
+                                    let host = new_url.host_str().unwrap_or("");
+                                    ctx.needs_rewrite_iptv = is_m3u8 && host.contains("116.199");
+                                }
+                                // ProxyPath 一般不涉及重写，但如果有需要可以扩展
+                                _ => {}
+                            }
+                        }
+
+                        info!("Internal redirect succeeded, final URL: {}, status: {}", final_url, final_status);
                     }
                     Err(e) => {
                         error!("Internal redirect failed: {:?}", e);
-                        // 回退：改写 Location 返回给客户端
                         let new_loc = match ctx.route_mode {
                             RouteMode::AntiLeechQuery => {
                                 let encoded = urlencoding::encode(&loc_for_fallback);
@@ -428,9 +458,13 @@ impl ProxyHttp for IptvProxy {
         _end_of_stream: bool,
         ctx: &mut Self::CTX,
     ) -> Result<Option<Duration>> {
+        // 如果存在缓存的 body（来自内部重定向），先设置为当前 body
         if let Some(cached) = ctx.cached_body.take() {
             *body = Some(cached);
-            return Ok(None);
+            // 如果需要重写，不要提前返回；如果不需要，可以直接返回
+            if !ctx.needs_rewrite_iptv && !ctx.needs_rewrite_surrit {
+                return Ok(None);
+            }
         }
 
         if let Some(bytes) = body.as_mut() {
