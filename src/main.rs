@@ -55,7 +55,6 @@ pub struct ProxyContext {
     needs_rewrite_iptv: bool,
     needs_rewrite_surrit: bool,
     base_url: Option<String>,
-    // 新增：标记是否需要将 .ts 扩展名还原为 .jpeg（用于 surrit 反盗链）
     needs_jpeg_fix: bool,
 }
 
@@ -193,7 +192,6 @@ impl ProxyHttp for IptvProxy {
                     ctx.target_url = Some(url.clone());
                     ctx.is_m3u8 = path.contains(".m3u8");
                     ctx.needs_referer = false;
-                    // 根据主机名设置是否需要反盗链头
                     if host.contains("surrit.com") || host.contains("fourhoi.com") {
                         ctx.needs_referer = true;
                     }
@@ -259,7 +257,6 @@ impl ProxyHttp for IptvProxy {
             upstream_request.set_uri(uri);
         }
 
-        // 为 IPTV 模式设置 Host 头
         if let ProxyMode::Iptv = ctx.mode {
             if let Some(url) = &ctx.target_url {
                 let host = url.host_str().unwrap_or("localhost");
@@ -271,7 +268,6 @@ impl ProxyHttp for IptvProxy {
                 };
                 upstream_request.insert_header("Host", &host_value)?;
             }
-            // 反盗链头：如果是 surrit/fourhoi 主机，则添加 Referer 和 UA
             if ctx.needs_referer {
                 upstream_request.insert_header("Referer", REFERER_VALUE)?;
                 upstream_request.insert_header("User-Agent", USER_AGENT)?;
@@ -304,15 +300,31 @@ impl ProxyHttp for IptvProxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // 处理重定向
         let status = upstream_response.status;
         if status == 301 || status == 302 || status == 307 || status == 308 {
             let new_loc = if let Some(loc) = upstream_response.headers.get("location") {
                 if let Ok(loc_str) = loc.to_str() {
                     let loc_str_owned = loc_str.to_string();
-                    let new_loc = format!("/iptv/{}", loc_str_owned);
-                    info!("Rewrite redirect location: {} -> {}", loc_str_owned, new_loc);
-                    Some(new_loc)
+                    // 尝试解析为完整 URL，若为 116.199.x.x 则使用 ?url= 格式，否则维持 /iptv/ 代理
+                    if let Ok(parsed_url) = url::Url::parse(&loc_str_owned) {
+                        if parsed_url.host_str().unwrap_or("").starts_with("116.199.") {
+                            let encoded = urlencoding::encode(&loc_str_owned);
+                            info!(
+                                "Rewrite redirect for 116.199.x.x: {} → /?url={}",
+                                loc_str_owned, encoded
+                            );
+                            Some(format!("/?url={}", encoded))
+                        } else {
+                            let new_loc = format!("/iptv/{}", loc_str_owned);
+                            info!("Rewrite redirect: {} -> {}", loc_str_owned, new_loc);
+                            Some(new_loc)
+                        }
+                    } else {
+                        // 无法解析为完整 URL（可能是相对路径），仍用 /iptv/ 代理
+                        let new_loc = format!("/iptv/{}", loc_str_owned);
+                        info!("Rewrite redirect (relative): {} -> {}", loc_str_owned, new_loc);
+                        Some(new_loc)
+                    }
                 } else {
                     warn!("Invalid Location header encoding");
                     None
@@ -371,7 +383,6 @@ impl ProxyHttp for IptvProxy {
                             if full_url.ends_with(".jpeg") {
                                 let mut ts_url = full_url.clone();
                                 ts_url = ts_url.replace(".jpeg", ".ts");
-                                // 追加 real_ext=jpeg 参数
                                 let separator = if ts_url.contains('?') { "&" } else { "?" };
                                 let fixed_url = format!("{}{}real_ext=jpeg", ts_url, separator);
                                 let proxy_line = format!("http://{}:{}/iptv/{}",
