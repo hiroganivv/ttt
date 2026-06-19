@@ -28,8 +28,8 @@ impl ProxyConfig {
 pub struct ProxyContext {
     target_url: Option<url::Url>,
     is_m3u8: bool,
-    base_url: Option<String>,      // 目录，如 http://example.com:8080/path/to/
-    origin_base: Option<String>,   // scheme://host:port，如 http://example.com:8080
+    base_url: Option<String>,
+    origin_base: Option<String>,
     needs_jpeg_fix: bool,
 }
 
@@ -54,33 +54,37 @@ impl IptvProxy {
         Self { config }
     }
 
-    /// 判断行是否像有效的媒体资源（需要重写为代理链接）
     fn is_likely_media_resource(line: &str) -> bool {
         const MEDIA_EXTS: &[&str] = &[
             ".ts", ".m3u8", ".m3u", ".mp4", ".m4s", ".m4a",
             ".aac", ".mp3", ".ogg", ".opus", ".vtt", ".srt",
             ".jpeg", ".jpg", ".png", ".key",
         ];
-        // 绝对路径
         if line.starts_with('/') {
             return true;
         }
-        // 忽略查询参数，只看路径部分
         let path = match line.find('?') {
             Some(pos) => &line[..pos],
             None => line,
         };
         for ext in MEDIA_EXTS {
             if path.ends_with(ext) {
+                let file_part = &path[..path.len() - ext.len()];
+                let filename = match file_part.rfind('/') {
+                    Some(pos) => &file_part[pos+1..],
+                    None => file_part,
+                };
+                // 文件名不能是纯数字（如 "185"），也不能为空
+                if filename.is_empty() || filename.chars().all(|c| c.is_ascii_digit()) {
+                    return false;
+                }
                 return true;
             }
         }
         false
     }
 
-    /// 判断标签行是否需要后跟 URI
     fn tag_requires_uri(line: &str) -> bool {
-        // #EXTINF 或 #EXT-X-STREAM-INF 或 #EXT-X-I-FRAME-STREAM-INF
         line.starts_with("#EXTINF:")
             || line.starts_with("#EXT-X-STREAM-INF:")
             || line.starts_with("#EXT-X-I-FRAME-STREAM-INF:")
@@ -95,16 +99,11 @@ impl ProxyHttp for IptvProxy {
         ProxyContext::new()
     }
 
-    async fn request_filter(
-        &self,
-        session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<bool> {
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
         let req = session.req_header();
         let path = req.uri.path();
         let query = req.uri.query().unwrap_or("");
 
-        // 健康检查
         if path == "/health" || (path == "/" && query.is_empty()) {
             let resp = ResponseHeader::build(200, None)?;
             session.write_response_header(Box::new(resp), false).await?;
@@ -118,7 +117,6 @@ impl ProxyHttp for IptvProxy {
             return Ok(true);
         }
 
-        // 解析 ?url=
         if let Some(url_param) = query.split('&').find(|p| p.starts_with("url=")) {
             let encoded = &url_param[4..];
             let decoded = urlencoding::decode(encoded)
@@ -129,7 +127,6 @@ impl ProxyHttp for IptvProxy {
             let mut url = url::Url::parse(&decoded_str)
                 .map_err(|e| Error::explain(ErrorType::HTTPStatus(400), format!("invalid URL: {e}")))?;
 
-            // 处理 jpeg 伪装
             if url.query_pairs().any(|(k, v)| k == "real_ext" && v == "jpeg") {
                 ctx.needs_jpeg_fix = true;
                 let clean: Vec<_> = url
@@ -146,11 +143,9 @@ impl ProxyHttp for IptvProxy {
             ctx.target_url = Some(url.clone());
             ctx.is_m3u8 = decoded_str.ends_with(".m3u8");
 
-            // 保存 scheme + authority (host:port)
             let authority = url.authority().to_string();
             ctx.origin_base = Some(format!("{}://{}", url.scheme(), authority));
 
-            // 正确截取目录前缀（基于 URL path，避免 :// 干扰）
             let path = url.path();
             let base_path = match path.rfind('/') {
                 Some(pos) => &path[..=pos],
@@ -158,7 +153,6 @@ impl ProxyHttp for IptvProxy {
             };
             ctx.base_url = Some(format!("{}://{}{}", url.scheme(), authority, base_path));
 
-            // 修改请求路径和 Host（为上游连接做准备）
             let path_bytes = url.path().as_bytes().to_vec();
             session.req_header_mut().set_raw_path(&path_bytes)?;
             session.req_header_mut().insert_header("Host", &authority)?;
@@ -168,11 +162,7 @@ impl ProxyHttp for IptvProxy {
         Err(Error::explain(ErrorType::HTTPStatus(400), "Use /?url=<encoded_target>"))
     }
 
-    async fn upstream_peer(
-        &self,
-        _session: &mut Session,
-        ctx: &mut Self::CTX,
-    ) -> Result<Box<HttpPeer>> {
+    async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
         let target = ctx.target_url.as_ref()
             .ok_or_else(|| Error::explain(ErrorType::InternalError, "No target URL"))?;
 
@@ -184,12 +174,7 @@ impl ProxyHttp for IptvProxy {
         Ok(Box::new(HttpPeer::new((host.clone(), port), is_https, host)))
     }
 
-    async fn upstream_request_filter(
-        &self,
-        _session: &mut Session,
-        upstream_request: &mut RequestHeader,
-        ctx: &mut Self::CTX,
-    ) -> Result<()> {
+    async fn upstream_request_filter(&self, _session: &mut Session, upstream_request: &mut RequestHeader, ctx: &mut Self::CTX) -> Result<()> {
         let url = ctx.target_url.as_ref()
             .ok_or_else(|| Error::explain(ErrorType::InternalError, "No target"))?;
 
@@ -204,9 +189,7 @@ impl ProxyHttp for IptvProxy {
             .map_err(|e| Error::explain(ErrorType::InternalError, format!("URI: {e}")))?;
         upstream_request.set_uri(uri);
 
-        // 使用 authority 设置 Host（含端口）
         upstream_request.insert_header("Host", url.authority())?;
-
         upstream_request.insert_header("Referer", REFERER_VALUE)?;
         upstream_request.insert_header("User-Agent", USER_AGENT)?;
         upstream_request.insert_header("Accept", "*/*")?;
@@ -218,15 +201,9 @@ impl ProxyHttp for IptvProxy {
         Ok(())
     }
 
-    async fn response_filter(
-        &self,
-        _session: &mut Session,
-        upstream_response: &mut ResponseHeader,
-        ctx: &mut Self::CTX,
-    ) -> Result<()> {
+    async fn response_filter(&self, _session: &mut Session, upstream_response: &mut ResponseHeader, ctx: &mut Self::CTX) -> Result<()> {
         let status = upstream_response.status;
 
-        // 重定向改写
         if status == 301 || status == 302 || status == 307 || status == 308 {
             if let Some(loc) = upstream_response.headers.get("location")
                 .and_then(|v| v.to_str().ok())
@@ -245,7 +222,6 @@ impl ProxyHttp for IptvProxy {
             }
         }
 
-        // 如果是 jpeg 伪装资源，修正 Content-Type 为 TS 视频流
         if ctx.needs_jpeg_fix {
             upstream_response.remove_header("Content-Type");
             upstream_response.insert_header("Content-Type", "video/mp2t")?;
@@ -259,51 +235,37 @@ impl ProxyHttp for IptvProxy {
         Ok(())
     }
 
-    fn response_body_filter(
-        &self,
-        _session: &mut Session,
-        body: &mut Option<Bytes>,
-        _end_of_stream: bool,
-        ctx: &mut Self::CTX,
-    ) -> Result<Option<Duration>> {
+    fn response_body_filter(&self, _session: &mut Session, body: &mut Option<Bytes>, _end_of_stream: bool, ctx: &mut Self::CTX) -> Result<Option<Duration>> {
         if let Some(bytes) = body.as_mut() {
             if ctx.is_m3u8 {
                 let content = match std::str::from_utf8(bytes) {
                     Ok(s) => s.to_string(),
                     Err(_) => return Ok(None),
                 };
-                let base = ctx.base_url.as_ref()
-                    .expect("base_url missing for m3u8 rewrite");
-                let origin_base = ctx.origin_base.as_ref()
-                    .expect("origin_base missing for m3u8 rewrite");
+                let base = ctx.base_url.as_ref().expect("base_url missing");
+                let origin_base = ctx.origin_base.as_ref().expect("origin_base missing");
                 let mut new_content = String::with_capacity(content.len());
-                let mut pending_tag: Option<String> = None; // 等待 URI 的标签行
+                let mut pending_tag: Option<String> = None;
 
                 for line in content.lines() {
                     if line.starts_with('#') {
-                        // 标签行
                         if let Some(tag) = pending_tag.take() {
-                            // 上一个标签没有 URI，直接输出
                             new_content.push_str(&tag);
                             new_content.push('\n');
                         }
                         if Self::tag_requires_uri(line) {
-                            // 缓存需要 URI 的标签，等待下一行
                             pending_tag = Some(line.to_string());
                         } else {
-                            // 不需要 URI 的标签，直接输出
                             new_content.push_str(line);
                             new_content.push('\n');
                         }
                     } else if line.is_empty() {
-                        // 空行直接输出
                         if let Some(tag) = pending_tag.take() {
                             new_content.push_str(&tag);
                             new_content.push('\n');
                         }
                         new_content.push('\n');
                     } else if line.starts_with("http://") || line.starts_with("https://") {
-                        // 完整 HTTP URL，重写
                         if let Some(tag) = pending_tag.take() {
                             new_content.push_str(&tag);
                             new_content.push('\n');
@@ -314,7 +276,6 @@ impl ProxyHttp for IptvProxy {
                             self.config.local_ip, self.config.bind_port, encoded
                         ));
                     } else if Self::is_likely_media_resource(line) {
-                        // 相对路径资源，重写
                         if let Some(tag) = pending_tag.take() {
                             new_content.push_str(&tag);
                             new_content.push('\n');
@@ -342,11 +303,9 @@ impl ProxyHttp for IptvProxy {
                             ));
                         }
                     } else {
-                        // 无效行，丢弃 pending_tag（同时丢弃无效行）
                         pending_tag = None;
                     }
                 }
-                // 输出最后一个悬空标签（如果有）
                 if let Some(tag) = pending_tag {
                     new_content.push_str(&tag);
                     new_content.push('\n');
@@ -358,38 +317,14 @@ impl ProxyHttp for IptvProxy {
         Ok(None)
     }
 
-    async fn logging(
-        &self,
-        session: &mut Session,
-        e: Option<&Error>,
-        _ctx: &mut Self::CTX,
-    ) {
+    async fn logging(&self, session: &mut Session, e: Option<&Error>, _ctx: &mut Self::CTX) {
         let req = session.req_header();
-        let status = session
-            .response_written()
-            .map(|r| r.status.as_u16())
-            .unwrap_or(0);
-        let client = session
-            .client_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_else(|| "unknown".into());
+        let status = session.response_written().map(|r| r.status.as_u16()).unwrap_or(0);
+        let client = session.client_addr().map(|a| a.to_string()).unwrap_or_else(|| "unknown".into());
         if let Some(err) = e {
-            error!(
-                "{} {} {} - Status:{} Error:{:?}",
-                client,
-                req.method,
-                req.uri.path(),
-                status,
-                err
-            );
+            error!("{} {} {} - Status:{} Error:{:?}", client, req.method, req.uri.path(), status, err);
         } else {
-            info!(
-                "{} {} {} - Status:{}",
-                client,
-                req.method,
-                req.uri.path(),
-                status
-            );
+            info!("{} {} {} - Status:{}", client, req.method, req.uri.path(), status);
         }
     }
 }
@@ -399,7 +334,6 @@ fn main() {
         .format_timestamp_millis()
         .init();
 
-    // 解析命令行参数：-Li <local_ip>
     let mut args = std::env::args().skip(1);
     let mut local_ip = None;
     while let Some(arg) = args.next() {
@@ -408,17 +342,12 @@ fn main() {
             break;
         }
     }
-    // 优先级：命令行 > 环境变量 LOCAL_IP > 默认值
     let local_ip = local_ip
         .or_else(|| std::env::var("LOCAL_IP").ok())
         .unwrap_or_else(|| "192.168.1.3".to_string());
 
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
-    let bind_port: u16 = bind_addr
-        .split(':')
-        .nth(1)
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8080);
+    let bind_port: u16 = bind_addr.split(':').nth(1).and_then(|p| p.parse().ok()).unwrap_or(8080);
 
     info!("========================================");
     info!("IPTV Proxy (unified ?url= mode)");
@@ -433,8 +362,7 @@ fn main() {
         nocapture: false,
         test: false,
         conf: None,
-    }))
-    .expect("Failed to create server");
+    })).expect("Failed to create server");
     server.bootstrap();
 
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
