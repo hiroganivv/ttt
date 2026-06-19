@@ -144,7 +144,6 @@ impl ProxyHttp for IptvProxy {
             }
 
             ctx.target_url = Some(url.clone());
-            // 注意：这里 is_m3u8 的赋值已被移到上面，不再重复
 
             let authority = url.authority().to_string();
             ctx.origin_base = Some(format!("{}://{}", url.scheme(), authority));
@@ -196,6 +195,18 @@ impl ProxyHttp for IptvProxy {
         upstream_request.insert_header("Referer", REFERER_VALUE)?;
         upstream_request.insert_header("User-Agent", USER_AGENT)?;
         upstream_request.insert_header("Accept", "*/*")?;
+
+        // ---- 新增：转发客户端的关键鉴权头，解决403问题 ----
+        let client_req = _session.req_header();
+        let forward_headers = ["cookie", "origin", "authorization", "x-forwarded-for"];
+        for h in &forward_headers {
+            if let Some(val) = client_req.headers.get(*h) {
+                if let Ok(v) = val.to_str() {
+                    let _ = upstream_request.insert_header(*h, v);
+                }
+            }
+        }
+        // --------------------------------------------------
 
         if ctx.is_m3u8 {
             upstream_request.remove_header("Accept-Encoding");
