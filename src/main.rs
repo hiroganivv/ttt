@@ -127,6 +127,9 @@ impl ProxyHttp for IptvProxy {
             let mut url = url::Url::parse(&decoded_str)
                 .map_err(|e| Error::explain(ErrorType::HTTPStatus(400), format!("invalid URL: {e}")))?;
 
+            // 修复：用 path() 判断是否是 m3u8/m3u，避免查询参数干扰
+            ctx.is_m3u8 = url.path().ends_with(".m3u8") || url.path().ends_with(".m3u");
+
             if url.query_pairs().any(|(k, v)| k == "real_ext" && v == "jpeg") {
                 ctx.needs_jpeg_fix = true;
                 let clean: Vec<_> = url
@@ -141,7 +144,7 @@ impl ProxyHttp for IptvProxy {
             }
 
             ctx.target_url = Some(url.clone());
-            ctx.is_m3u8 = decoded_str.ends_with(".m3u8");
+            // 注意：这里 is_m3u8 的赋值已被移到上面，不再重复
 
             let authority = url.authority().to_string();
             ctx.origin_base = Some(format!("{}://{}", url.scheme(), authority));
