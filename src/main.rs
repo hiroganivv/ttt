@@ -251,6 +251,20 @@ impl ProxyHttp for IptvProxy {
                         new_content.push_str(line);
                         new_content.push('\n');
                     } else {
+                        // 跳过看起来像残缺标签的行（例如 XTINF:4.000000,）
+                        // 规则：以字母开头，且包含冒号，但不是 http: 或 https:
+                        if let Some(pos) = line.find(':') {
+                            if pos > 0
+                                && line[..pos].chars().all(|c| c.is_ascii_alphabetic())
+                                && !line.starts_with("http://")
+                                && !line.starts_with("https://")
+                            {
+                                new_content.push_str(line);
+                                new_content.push('\n');
+                                continue;
+                            }
+                        }
+
                         let full_url = if line.starts_with("http://") || line.starts_with("https://") {
                             line.to_string()
                         } else if line.starts_with('/') {
