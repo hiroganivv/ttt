@@ -217,7 +217,6 @@ impl ProxyHttp for IptvProxy {
         if ctx.needs_jpeg_fix {
             upstream_response.remove_header("Content-Type");
             upstream_response.insert_header("Content-Type", "video/mp2t")?;
-            // 移除可能干扰的文件下载头
             upstream_response.remove_header("Content-Disposition");
         }
 
@@ -327,11 +326,20 @@ fn main() {
         .format_timestamp_millis()
         .init();
 
-    info!("========================================");
-    info!("IPTV Proxy (unified ?url= mode)");
-    info!("========================================");
+    // 解析命令行参数：-Li <local_ip>
+    let mut args = std::env::args().skip(1);
+    let mut local_ip = None;
+    while let Some(arg) = args.next() {
+        if arg == "-Li" {
+            local_ip = args.next();
+            break;
+        }
+    }
+    // 优先级：命令行 > 环境变量 LOCAL_IP > 默认值
+    let local_ip = local_ip
+        .or_else(|| std::env::var("LOCAL_IP").ok())
+        .unwrap_or_else(|| "192.168.1.3".to_string());
 
-    let local_ip = std::env::var("LOCAL_IP").unwrap_or_else(|_| "192.168.1.3".to_string());
     let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let bind_port: u16 = bind_addr
         .split(':')
@@ -339,6 +347,9 @@ fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
+    info!("========================================");
+    info!("IPTV Proxy (unified ?url= mode)");
+    info!("========================================");
     info!("Local IP: {}", local_ip);
     info!("Bind: {}", bind_addr);
 
@@ -354,7 +365,6 @@ fn main() {
     server.bootstrap();
 
     let mut proxy_service = http_proxy_service(&server.configuration, IptvProxy::new(config));
-    // 注意：此版本 Pingora 不需要显式启用响应体过滤，实现 response_body_filter 即自动调用
     proxy_service.add_tcp(&bind_addr);
     server.add_service(proxy_service);
 
