@@ -54,25 +54,36 @@ impl IptvProxy {
         Self { config }
     }
 
-    /// 判断行是否看起来像有效的媒体资源（需要重写）
+    /// 判断行是否像有效的媒体资源（需要重写为代理链接）
     fn is_likely_media_resource(line: &str) -> bool {
-        // 常见的媒体扩展名，可自行扩充
         const MEDIA_EXTS: &[&str] = &[
             ".ts", ".m3u8", ".m3u", ".mp4", ".m4s", ".m4a",
             ".aac", ".mp3", ".ogg", ".opus", ".vtt", ".srt",
             ".jpeg", ".jpg", ".png", ".key",
         ];
-        // 以 / 开头的绝对路径
+        // 绝对路径
         if line.starts_with('/') {
             return true;
         }
-        // 以常见媒体扩展名结尾
+        // 忽略查询参数，只看路径部分
+        let path = match line.find('?') {
+            Some(pos) => &line[..pos],
+            None => line,
+        };
         for ext in MEDIA_EXTS {
-            if line.ends_with(ext) {
+            if path.ends_with(ext) {
                 return true;
             }
         }
         false
+    }
+
+    /// 判断标签行是否需要后跟 URI
+    fn tag_requires_uri(line: &str) -> bool {
+        // #EXTINF 或 #EXT-X-STREAM-INF 或 #EXT-X-I-FRAME-STREAM-INF
+        line.starts_with("#EXTINF:")
+            || line.starts_with("#EXT-X-STREAM-INF:")
+            || line.starts_with("#EXT-X-I-FRAME-STREAM-INF:")
     }
 }
 
@@ -266,21 +277,48 @@ impl ProxyHttp for IptvProxy {
                 let origin_base = ctx.origin_base.as_ref()
                     .expect("origin_base missing for m3u8 rewrite");
                 let mut new_content = String::with_capacity(content.len());
+                let mut pending_tag: Option<String> = None; // 等待 URI 的标签行
 
                 for line in content.lines() {
-                    if line.starts_with('#') || line.trim().is_empty() {
-                        new_content.push_str(line);
+                    if line.starts_with('#') {
+                        // 标签行
+                        if let Some(tag) = pending_tag.take() {
+                            // 上一个标签没有 URI，直接输出
+                            new_content.push_str(&tag);
+                            new_content.push('\n');
+                        }
+                        if Self::tag_requires_uri(line) {
+                            // 缓存需要 URI 的标签，等待下一行
+                            pending_tag = Some(line.to_string());
+                        } else {
+                            // 不需要 URI 的标签，直接输出
+                            new_content.push_str(line);
+                            new_content.push('\n');
+                        }
+                    } else if line.is_empty() {
+                        // 空行直接输出
+                        if let Some(tag) = pending_tag.take() {
+                            new_content.push_str(&tag);
+                            new_content.push('\n');
+                        }
                         new_content.push('\n');
                     } else if line.starts_with("http://") || line.starts_with("https://") {
-                        // 完整的 HTTP(S) URL，直接重写
-                        let full_url = line.to_string();
-                        let encoded = urlencoding::encode(&full_url);
+                        // 完整 HTTP URL，重写
+                        if let Some(tag) = pending_tag.take() {
+                            new_content.push_str(&tag);
+                            new_content.push('\n');
+                        }
+                        let encoded = urlencoding::encode(line);
                         new_content.push_str(&format!(
                             "http://{}:{}/?url={}\n",
                             self.config.local_ip, self.config.bind_port, encoded
                         ));
                     } else if Self::is_likely_media_resource(line) {
-                        // 看起来像媒体资源，进行拼接重写
+                        // 相对路径资源，重写
+                        if let Some(tag) = pending_tag.take() {
+                            new_content.push_str(&tag);
+                            new_content.push('\n');
+                        }
                         let full_url = if line.starts_with('/') {
                             format!("{}{}", origin_base, line)
                         } else {
@@ -304,12 +342,15 @@ impl ProxyHttp for IptvProxy {
                             ));
                         }
                     } else {
-                        // 无效行，保留原样
-                        new_content.push_str(line);
-                        new_content.push('\n');
+                        // 无效行，丢弃 pending_tag（同时丢弃无效行）
+                        pending_tag = None;
                     }
                 }
-
+                // 输出最后一个悬空标签（如果有）
+                if let Some(tag) = pending_tag {
+                    new_content.push_str(&tag);
+                    new_content.push('\n');
+                }
                 *bytes = Bytes::from(new_content);
                 info!("M3U8 rewritten ({} lines)", content.lines().count());
             }
