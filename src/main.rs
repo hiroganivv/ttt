@@ -53,6 +53,27 @@ impl IptvProxy {
     pub fn new(config: ProxyConfig) -> Self {
         Self { config }
     }
+
+    /// 判断行是否看起来像有效的媒体资源（需要重写）
+    fn is_likely_media_resource(line: &str) -> bool {
+        // 常见的媒体扩展名，可自行扩充
+        const MEDIA_EXTS: &[&str] = &[
+            ".ts", ".m3u8", ".m3u", ".mp4", ".m4s", ".m4a",
+            ".aac", ".mp3", ".ogg", ".opus", ".vtt", ".srt",
+            ".jpeg", ".jpg", ".png", ".key",
+        ];
+        // 以 / 开头的绝对路径
+        if line.starts_with('/') {
+            return true;
+        }
+        // 以常见媒体扩展名结尾
+        for ext in MEDIA_EXTS {
+            if line.ends_with(ext) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[async_trait]
@@ -250,20 +271,17 @@ impl ProxyHttp for IptvProxy {
                     if line.starts_with('#') || line.trim().is_empty() {
                         new_content.push_str(line);
                         new_content.push('\n');
-                    } else {
-                        // 过滤非资源行：必须包含 '/' 或 '.' 或是完整 HTTP(S) URL，否则保留原样
-                        if !line.contains('/') && !line.contains('.')
-                            && !line.starts_with("http://")
-                            && !line.starts_with("https://")
-                        {
-                            new_content.push_str(line);
-                            new_content.push('\n');
-                            continue;
-                        }
-
-                        let full_url = if line.starts_with("http://") || line.starts_with("https://") {
-                            line.to_string()
-                        } else if line.starts_with('/') {
+                    } else if line.starts_with("http://") || line.starts_with("https://") {
+                        // 完整的 HTTP(S) URL，直接重写
+                        let full_url = line.to_string();
+                        let encoded = urlencoding::encode(&full_url);
+                        new_content.push_str(&format!(
+                            "http://{}:{}/?url={}\n",
+                            self.config.local_ip, self.config.bind_port, encoded
+                        ));
+                    } else if Self::is_likely_media_resource(line) {
+                        // 看起来像媒体资源，进行拼接重写
+                        let full_url = if line.starts_with('/') {
                             format!("{}{}", origin_base, line)
                         } else {
                             format!("{}{}", base, line)
@@ -285,6 +303,10 @@ impl ProxyHttp for IptvProxy {
                                 self.config.local_ip, self.config.bind_port, encoded
                             ));
                         }
+                    } else {
+                        // 无效行，保留原样
+                        new_content.push_str(line);
+                        new_content.push('\n');
                     }
                 }
 
