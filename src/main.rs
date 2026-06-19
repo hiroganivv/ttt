@@ -10,8 +10,8 @@ use pingora::server::configuration::Opt;
 use pingora::server::Server;
 use std::time::Duration;
 
-const REFERER_VALUE: &str = "https://missav.ws/dm242/cn";
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const DEFAULT_REFERER: &str = "https://missav.ws/dm242/cn";
+const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 #[derive(Clone)]
 pub struct ProxyConfig {
@@ -74,7 +74,6 @@ impl IptvProxy {
                     Some(pos) => &file_part[pos+1..],
                     None => file_part,
                 };
-                // 文件名不能是纯数字（如 "185"），也不能为空
                 if filename.is_empty() || filename.chars().all(|c| c.is_ascii_digit()) {
                     return false;
                 }
@@ -127,7 +126,7 @@ impl ProxyHttp for IptvProxy {
             let mut url = url::Url::parse(&decoded_str)
                 .map_err(|e| Error::explain(ErrorType::HTTPStatus(400), format!("invalid URL: {e}")))?;
 
-            // 修复：用 path() 判断是否是 m3u8/m3u，避免查询参数干扰
+            // 用 path() 判断 m3u8/m3u，避免查询参数干扰
             ctx.is_m3u8 = url.path().ends_with(".m3u8") || url.path().ends_with(".m3u");
 
             if url.query_pairs().any(|(k, v)| k == "real_ext" && v == "jpeg") {
@@ -176,7 +175,7 @@ impl ProxyHttp for IptvProxy {
         Ok(Box::new(HttpPeer::new((host.clone(), port), is_https, host)))
     }
 
-    async fn upstream_request_filter(&self, _session: &mut Session, upstream_request: &mut RequestHeader, ctx: &mut Self::CTX) -> Result<()> {
+    async fn upstream_request_filter(&self, session: &mut Session, upstream_request: &mut RequestHeader, ctx: &mut Self::CTX) -> Result<()> {
         let url = ctx.target_url.as_ref()
             .ok_or_else(|| Error::explain(ErrorType::InternalError, "No target"))?;
 
@@ -191,22 +190,44 @@ impl ProxyHttp for IptvProxy {
             .map_err(|e| Error::explain(ErrorType::InternalError, format!("URI: {e}")))?;
         upstream_request.set_uri(uri);
 
+        // 设置 Host
         upstream_request.insert_header("Host", url.authority())?;
-        upstream_request.insert_header("Referer", REFERER_VALUE)?;
-        upstream_request.insert_header("User-Agent", USER_AGENT)?;
-        upstream_request.insert_header("Accept", "*/*")?;
 
-        // ---- 新增：转发客户端的关键鉴权头，解决403问题 ----
-        let client_req = _session.req_header();
-        let forward_headers = ["cookie", "origin", "authorization", "x-forwarded-for"];
+        // 从客户端原始请求中获取关键头部，优先使用客户端的真实值
+        let client_req = session.req_header();
+
+        // User-Agent：优先客户端，否则用默认
+        if let Some(ua) = client_req.headers.get("user-agent")
+            .and_then(|v| v.to_str().ok()) {
+            upstream_request.insert_header("User-Agent", ua)?;
+        } else {
+            upstream_request.insert_header("User-Agent", DEFAULT_USER_AGENT)?;
+        }
+
+        // Referer：优先客户端，否则用默认
+        if let Some(ref_val) = client_req.headers.get("referer")
+            .and_then(|v| v.to_str().ok()) {
+            upstream_request.insert_header("Referer", ref_val)?;
+        } else {
+            upstream_request.insert_header("Referer", DEFAULT_REFERER)?;
+        }
+
+        // 转发其他可能需要的头
+        let forward_headers = ["origin", "cookie", "authorization", "x-forwarded-for"];
         for h in &forward_headers {
             if let Some(val) = client_req.headers.get(*h) {
                 if let Ok(v) = val.to_str() {
-                    let _ = upstream_request.insert_header(*h, v);
+                    upstream_request.insert_header(*h, v)?;
                 }
             }
         }
-        // --------------------------------------------------
+
+        upstream_request.insert_header("Accept", "*/*")?;
+
+        // 调试日志：显示实际发往上游的关键头
+        let ua_dbg = upstream_request.headers.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("none");
+        let ref_dbg = upstream_request.headers.get("referer").and_then(|v| v.to_str().ok()).unwrap_or("none");
+        info!("Upstream request headers -> UA: {}, Referer: {}", ua_dbg, ref_dbg);
 
         if ctx.is_m3u8 {
             upstream_request.remove_header("Accept-Encoding");
